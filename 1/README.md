@@ -151,9 +151,9 @@ name: my-app
 description: Example Taskfile — local Docker Compose + remote Podman deploy
 
 variables:
-  APP_NAME: my-app
+  APP_NAME: ${PROJECT_NAME:-my-app}
   TAG: latest
-  REGISTRY: ghcr.io/your-org
+  REGISTRY: ${REGISTRY:-ghcr.io/your-org}
 
 environments:
   local:
@@ -161,8 +161,8 @@ environments:
     compose_command: docker compose
 
   prod:
-    ssh_host: ${SSH_HOST:-your-server.example.com}
-    ssh_user: ${SSH_USER:-deploy}
+    ssh_host: ${PROD_HOST:-your-server.example.com}
+    ssh_user: ${DEPLOY_USER:-deploy}
     container_runtime: podman
 
 tasks:
@@ -177,8 +177,13 @@ tasks:
     deps: [build]
     cmds:
       - "@local ${COMPOSE} up -d"
-      - "@remote podman pull ${REGISTRY}/${APP_NAME}:${TAG}"
-      - "@remote podman run -d --name ${APP_NAME} --replace -p 8000:8000 ${REGISTRY}/${APP_NAME}:${TAG}"
+      - |
+        @remote echo "📦 Transferring images to remote server..."
+        docker save ${REGISTRY}/sandbox-web:${TAG} | ssh -p 22 -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'
+        docker save ${REGISTRY}/sandbox-landing:${TAG} | ssh -p 22 -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'
+      - |
+        @remote podman run -d --name sandbox-web --replace -p ${PORT_WEB:-8000}:8000 ${REGISTRY}/sandbox-web:${TAG} || true
+        podman run -d --name sandbox-landing --replace -p ${PORT_LANDING:-3000}:80 ${REGISTRY}/sandbox-landing:${TAG} || true
 
   dev:
     desc: Start local dev with hot-reload
@@ -193,22 +198,22 @@ tasks:
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} down"
-      - "@remote podman stop ${APP_NAME} 2>/dev/null || true"
-      - "@remote podman rm ${APP_NAME} 2>/dev/null || true"
+      - "@remote podman stop sandbox-web sandbox-landing 2>/dev/null || true"
+      - "@remote podman rm sandbox-web sandbox-landing 2>/dev/null || true"
 
   logs:
     desc: View logs
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} logs -f"
-      - "@remote podman logs ${APP_NAME} -f"
+      - "@remote podman logs -f sandbox-web & podman logs -f sandbox-landing"
 
   status:
     desc: Show service status
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} ps"
-      - "@remote podman ps --filter name=${APP_NAME}"
+      - "@remote podman ps --filter name=sandbox-web --filter name=sandbox-landing"
 ```
 
 ### scripts/ — skrypty bash
@@ -737,6 +742,7 @@ PORT_LANDING=3000
 STAGING_HOST=
 PROD_HOST=
 DEPLOY_USER=deploy
+REGISTRY=ghcr.io/your-org
 ```
 
 ### .env.example — szablon zmiennych środowiskowych
