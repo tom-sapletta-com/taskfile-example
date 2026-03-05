@@ -294,19 +294,38 @@ tasks:
       - |
         if [ ! -f .env.local ]; then
           cat > .env.local << 'EOF'
-OPENROUTER_API_KEY=
-DOMAIN_WEB=app.localhost
-DOMAIN_LANDING=localhost
-PORT_WEB=8000
-PORT_LANDING=3000
-PORT_TRAEFIK_WEB=80
-PORT_TRAEFIK_DASHBOARD=8080
-EOF
+          OPENROUTER_API_KEY=
+          DOMAIN_WEB=app.localhost
+          DOMAIN_LANDING=localhost
+          PORT_WEB=8000
+          PORT_LANDING=3000
+          PORT_TRAEFIK_WEB=80
+          PORT_TRAEFIK_DASHBOARD=8080
+          EOF
           echo "✅ Created .env.local — set your OPENROUTER_API_KEY"
         fi
       - pip install fastapi uvicorn jinja2 python-multipart httpx aiosqlite 2>/dev/null || true
       - npm install --prefix apps/desktop 2>/dev/null || true
       - echo "✅ Project initialized"
+
+  setup-hosts:
+    desc: "Configure deployment hosts (staging/prod) interactively"
+    cmds:
+      - |
+        echo "🌐 Configuring deployment hosts"
+        for var in STAGING_HOST PROD_HOST DEPLOY_USER; do
+          val=$(grep "^${var}=" .env.local 2>/dev/null | cut -d= -f2 || echo "")
+          [ "$var" = "DEPLOY_USER" ] && val=${val:-deploy}
+          printf "%s [%s]: " "$var" "$val"
+          read input
+          new_val=${input:-$val}
+          if grep -q "^${var}=" .env.local 2>/dev/null; then
+            sed -i "s/^${var}=.*/${var}=${new_val}/" .env.local
+          else
+            echo "${var}=${new_val}" >> .env.local
+          fi
+        done
+        echo "✅ Hosts saved to .env.local"
 
   # ─── Code Generation (LLM Agent) ─────────────────────────────────
 

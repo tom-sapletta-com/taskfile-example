@@ -5,23 +5,37 @@
 ## Wymagania
 
 ```bash
-pip install markpact taskfile
+pip install markpact taskfile --upgrade
 ```
 
-## Szybki start (3 kroki)
+## Szybki start (5 kroków)
 
 ```bash
 # 1. Wypakuj wszystkie pliki z README.md (markpact)
 markpact README.md
 
-# 2. Konfiguracja hostów deploymentu (interaktywnie)
-taskfile run setup-hosts
+# 2. Konfiguracja środowiska (interaktywnie) 🔐
+#    - wybierz providera LLM (OpenRouter, OpenAI, Anthropic, Ollama, Groq)
+#    - wprowadź API key (z podpowiedziami/linkami)
+#    - ustaw porty i nazwę projektu
+taskfile setup env
 
-# 3. Generowanie kodu przez Aider (używa promptów)
+# 3. Konfiguracja hostów deploymentu (staging/prod)
+taskfile setup hosts
+
+# 4. Generowanie kodu przez Aider (używa promptów)
 taskfile run generate
 
-# 4. Start lokalny
+# 5. Start lokalny
 taskfile run dev
+```
+
+**Alternatywnie** - użyj dłuższej składni (obie działają):
+```bash
+markpact README.md
+taskfile run setup-env     # zamiast: taskfile setup env
+taskfile run setup-hosts   # zamiast: taskfile setup hosts
+taskfile run generate && taskfile run dev
 ```
 
 ## Deployment
@@ -35,13 +49,13 @@ taskfile run deploy
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         README.md (ten plik)                         │
-│  ┌─────────────────┐ ┌─────────────────┐ ┌──────────────────────┐  │
-│  │ markpact:file   │ │ markpact:file   │ │ markpact:file        │  │
-│  │ path=Taskfile.yml│ │ path=.env       │ │ path=prompts/web.md │  │
-│  │                 │ │                 │ │                     │  │
-│  │ (logika tasków) │ │ (konfiguracja)  │ │ (prompt dla AI)     │  │
-│  └─────────────────┘ └─────────────────┘ └──────────────────────┘  │
+│                         README.md (ten plik)                        │
+│  ┌──────────────────┐ ┌─────────────────┐ ┌──────────────────────┐  │
+│  │ markpact:file    │ │ markpact:file   │ │ markpact:file        │  │
+│  │ path=Taskfile.yml│ │ path=.env       │ │ path=prompts/web.md  │  │
+│  │                  │ │                 │ │                      │  │
+│  │ (logika tasków)  │ │ (konfiguracja)  │ │ (prompt dla AI)      │  │
+│  └──────────────────┘ └─────────────────┘ └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
            │
            │ markpact README.md
@@ -49,14 +63,14 @@ taskfile run deploy
            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  ./ (folder roboczy)                                                │
-│  ├── Taskfile.yml      ← logika (init, setup-hosts, generate...)     │
-│  ├── .env              ← konfiguracja (hosty, porty, klucze)          │
+│  ├── Taskfile.yml      ← logika (init, setup-hosts, generate...)    │
+│  ├── .env              ← konfiguracja (hosty, porty, klucze)        │
 │  ├── .gitignore        ← ignoruje .env, .venv                       │
 │  ├── project.yml       ← specyfikacja projektu                      │
 │  ├── prompts/          ← prompty dla Aidera                         │
 │  │   ├── web.md                                                     │
-│  │   ├── desktop.md                                                │
-│  │   └── landing.md                                                │
+│  │   ├── desktop.md                                                 │
+│  │   └── landing.md                                                 │
 │  ├── docker-compose.yml ← konfiguracja lokalna                      │
 │  └── apps/             ← kod wygenerowany przez Aidera              │
 └─────────────────────────────────────────────────────────────────────┘
@@ -127,34 +141,314 @@ functions:
       print(f"[notify] {os.environ.get('FN_ARGS', 'Done')}")
 
 tasks:
-  setup-hosts:
-    desc: "Konfiguracja hostów deploymentu"
+  doctor:
+    desc: "Diagnostyka i autonaprawa projektu"
     cmds:
       - |
-        echo "🌐 Konfiguracja hostów"
+        # Load environment variables from .env
+        [ -f .env ] && export $(grep -v '^#' .env | xargs) 2>/dev/null || true
+        echo "🔧 Taskfile Doctor - sprawdzam projekt..."
+        ERRORS=0
+
+        # Sprawdź czy .env istnieje
+        if [ ! -f .env ]; then
+          echo "⚠️  Brak .env - tworzę z szablonu..."
+          printf '%s\n' \
+            "PROJECT_NAME=taskfile-example" \
+            "VERSION=1.0.0" \
+            "OPENROUTER_API_KEY=" \
+            "AIDER_MODEL=openrouter/anthropic/claude-sonnet-4" \
+            "PORT_WEB=8000" \
+            "PORT_LANDING=3000" \
+            "STAGING_HOST=" \
+            "PROD_HOST=" \
+            "DEPLOY_USER=deploy" > .env
+          echo "✅ Utworzono .env"
+          ((ERRORS++))
+        fi
+
+        # Sprawdź czy prompts/ istnieją
+        if [ ! -d prompts ]; then
+          echo "⚠️  Brak prompts/ - uruchom: taskfile run init"
+          ((ERRORS++))
+        fi
+
+        # Sprawdź czy .venv istnieje
+        if [ ! -d .venv ]; then
+          echo "⚠️  Brak .venv - uruchom: taskfile run init"
+          ((ERRORS++))
+        fi
+
+        # Sprawdź OPENROUTER_API_KEY
+        if [ -z "${OPENROUTER_API_KEY}" ]; then
+          echo "⚠️  Brak OPENROUTER_API_KEY w .env"
+          echo ""
+          echo "   🔧 Rozwiązanie: Uruchom interaktywną konfigurację:"
+          echo "      taskfile run setup-env"
+          echo ""
+          echo "   Lub ręcznie dodaj klucz:"
+          echo "      echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env"
+          echo ""
+          ((ERRORS++))
+        fi
+
+        if [ $ERRORS -eq 0 ]; then
+          echo "✅ Wszystko OK! Projekt gotowy."
+        else
+          echo "🔧 Naprawiono $ERRORS problemów. Sprawdź powyżej."
+        fi
+
+  setup-env:
+    desc: "🔐 Interaktywna konfiguracja .env - LLM provider, API keys, porty"
+    cmds:
+      - |
+        echo ""
+        echo "🔐 Konfiguracja środowiska (.env)"
+        echo ""
+
+        # Upewnij się że .env istnieje
+        if [ ! -f .env ]; then
+          touch .env
+        fi
+
+        # === LLM PROVIDER ===
+        echo "🤖 Wybierz providera LLM:"
+        echo ""
+        echo "  1) OpenRouter (darmowe modele!) - https://openrouter.ai"
+        echo "     💡 Najlepszy wybór - darmowe tokeny, wiele modeli"
+        echo ""
+        echo "  2) OpenAI (GPT-4, GPT-3.5) - https://platform.openai.com"
+        echo "     💡 Płatne, ale bardzo stabilne"
+        echo ""
+        echo "  3) Anthropic (Claude) - https://console.anthropic.com"
+        echo "     💡 Bardzo dobre do kodu"
+        echo ""
+        echo "  4) Ollama (lokalnie, darmowe!) - https://ollama.com"
+        echo "     💡 Działa offline, wymaga instalacji Ollama"
+        echo ""
+        echo "  5) Groq (szybkie, tanie) - https://console.groq.com"
+        echo "     💡 Bardzo szybkie odpowiedzi"
+        echo ""
+        printf "Wybór (1-5) [1]: "
+        read PROVIDER_CHOICE
+        PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
+
+        case "$PROVIDER_CHOICE" in
+          1)
+            PROVIDER="openrouter"
+            API_URL="https://openrouter.ai/settings/keys"
+            DEFAULT_MODEL="openrouter/anthropic/claude-sonnet-4"
+            ;;
+          2)
+            PROVIDER="openai"
+            API_URL="https://platform.openai.com/api-keys"
+            DEFAULT_MODEL="gpt-4"
+            ;;
+          3)
+            PROVIDER="anthropic"
+            API_URL="https://console.anthropic.com/settings/keys"
+            DEFAULT_MODEL="claude-3-5-sonnet-20241022"
+            ;;
+          4)
+            PROVIDER="ollama"
+            API_URL="https://ollama.com/download"
+            DEFAULT_MODEL="qwen2.5-coder:14b"
+            ;;
+          5)
+            PROVIDER="groq"
+            API_URL="https://console.groq.com/keys"
+            DEFAULT_MODEL="groq/llama-3.3-70b-versatile"
+            ;;
+          *)
+            PROVIDER="openrouter"
+            API_URL="https://openrouter.ai/settings/keys"
+            DEFAULT_MODEL="openrouter/anthropic/claude-sonnet-4"
+            ;;
+        esac
+
+        echo ""
+        echo "✅ Wybrano: $PROVIDER"
+        echo ""
+
+        # === API KEY ===
+        CURRENT_KEY=$(grep "^OPENROUTER_API_KEY=\|^OPENAI_API_KEY=\|^ANTHROPIC_API_KEY=\|^GROQ_API_KEY=" .env 2>/dev/null | cut -d= -f2 || echo "")
+
+        if [ -n "$CURRENT_KEY" ]; then
+          echo "🔑 Obecny klucz API: ${CURRENT_KEY:0:10}..."
+          printf "Zmienić? (t/n) [n]: "
+          read CHANGE_KEY
+          if [ "$CHANGE_KEY" != "t" ]; then
+            echo "   Pozostawiam obecny klucz"
+            API_KEY="$CURRENT_KEY"
+          else
+            API_KEY=""
+          fi
+        fi
+
+        if [ -z "$API_KEY" ] && [ "$PROVIDER" != "ollama" ]; then
+          echo ""
+          echo "📋 Instrukcja pobrania klucza API:"
+          echo ""
+          echo "   1. Otwórz: $API_URL"
+          echo "   2. Zaloguj się lub utwórz konto"
+          echo "   3. Utwórz nowy klucz API"
+          echo "   4. Skopiuj klucz i wklej poniżej"
+          echo ""
+          printf "🔑 Wklej klucz API: "
+          read API_KEY
+
+          # Zapisz klucz z odpowiednią nazwą zmiennej
+          case "$PROVIDER" in
+            openrouter)
+              sed -i "/^OPENROUTER_API_KEY=/d" .env 2>/dev/null
+              echo "OPENROUTER_API_KEY=$API_KEY" >> .env
+              ;;
+            openai)
+              sed -i "/^OPENAI_API_KEY=/d" .env 2>/dev/null
+              echo "OPENAI_API_KEY=$API_KEY" >> .env
+              ;;
+            anthropic)
+              sed -i "/^ANTHROPIC_API_KEY=/d" .env 2>/dev/null
+              echo "ANTHROPIC_API_KEY=$API_KEY" >> .env
+              ;;
+            groq)
+              sed -i "/^GROQ_API_KEY=/d" .env 2>/dev/null
+              echo "GROQ_API_KEY=$API_KEY" >> .env
+              ;;
+          esac
+
+          echo "   ✅ Klucz zapisany"
+        fi
+
+        # === MODEL ===
+        echo ""
+        CURRENT_MODEL=$(grep "^AIDER_MODEL=" .env 2>/dev/null | cut -d= -f2 || echo "")
+        if [ -n "$CURRENT_MODEL" ]; then
+          echo "🎯 Obecny model: $CURRENT_MODEL"
+        fi
+        printf "🎯 Model [$DEFAULT_MODEL]: "
+        read MODEL
+        MODEL=${MODEL:-$DEFAULT_MODEL}
+        sed -i "/^AIDER_MODEL=/d" .env 2>/dev/null
+        echo "AIDER_MODEL=$MODEL" >> .env
+
+        # === PORTY ===
+        echo ""
+        echo "🌐 Konfiguracja portów:"
+        echo ""
+
+        CURRENT_WEB=$(grep "^PORT_WEB=" .env 2>/dev/null | cut -d= -f2 || echo "")
+        CURRENT_WEB=${CURRENT_WEB:-8000}
+        printf "   Port Web App [$CURRENT_WEB]: "
+        read PORT_WEB
+        PORT_WEB=${PORT_WEB:-$CURRENT_WEB}
+        sed -i "/^PORT_WEB=/d" .env 2>/dev/null
+        echo "PORT_WEB=$PORT_WEB" >> .env
+
+        CURRENT_LANDING=$(grep "^PORT_LANDING=" .env 2>/dev/null | cut -d= -f2 || echo "")
+        CURRENT_LANDING=${CURRENT_LANDING:-3000}
+        printf "   Port Landing [$CURRENT_LANDING]: "
+        read PORT_LANDING
+        PORT_LANDING=${PORT_LANDING:-$CURRENT_LANDING}
+        sed -i "/^PORT_LANDING=/d" .env 2>/dev/null
+        echo "PORT_LANDING=$PORT_LANDING" >> .env
+
+        # === PROJECT NAME ===
+        CURRENT_NAME=$(grep "^PROJECT_NAME=" .env 2>/dev/null | cut -d= -f2 || echo "")
+        CURRENT_NAME=${CURRENT_NAME:-taskfile-example}
+        printf "\n📁 Nazwa projektu [$CURRENT_NAME]: "
+        read PROJECT_NAME
+        PROJECT_NAME=${PROJECT_NAME:-$CURRENT_NAME}
+        sed -i "/^PROJECT_NAME=/d" .env 2>/dev/null
+        echo "PROJECT_NAME=$PROJECT_NAME" >> .env
+
+        # === VERSION ===
+        sed -i "/^VERSION=/d" .env 2>/dev/null
+        echo "VERSION=1.0.0" >> .env
+
+        echo ""
+        echo "✅ Konfiguracja zapisana do .env"
+        echo ""
+        echo "📋 Podsumowanie:"
+        echo "   Provider: $PROVIDER"
+        echo "   Model: $MODEL"
+        echo "   Porty: $PORT_WEB (web), $PORT_LANDING (landing)"
+        echo ""
+        echo "🔧 Teraz uruchom: taskfile run setup-hosts"
+
+  setup-hosts:
+    desc: "Konfiguracja hostów deploymentu (podpowiedzi: staging.example.com, prod.example.com)"
+    cmds:
+      - |
+        # Autonaprawa: sprawdź czy .env istnieje
+        if [ ! -f .env ]; then
+          echo "⚠️  Brak .env - tworzę..."
+          taskfile run doctor
+        fi
+
+        echo ""
+        echo "🌐 Konfiguracja hostów deploymentu"
+        echo ""
+        echo "💡 Przykłady:"
+        echo "   Staging: staging.example.com, staging.myapp.io, 192.168.1.100"
+        echo "   Prod:    prod.example.com, www.myapp.io, 203.0.113.10"
+        echo "   User:    deploy, ubuntu, ec2-user"
+        echo ""
+        echo "   (Wciśnij Enter aby pominąć lub zachować obecną wartość)"
+        echo ""
+
         for var in STAGING_HOST PROD_HOST DEPLOY_USER; do
           val=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2 || echo "")
           [ "$var" = "DEPLOY_USER" ] && val=${val:-deploy}
-          printf "%s [%s]: " "$var" "$val"
+
+          # Podpowiedzi dla konkretnych zmiennych
+          case "$var" in
+            STAGING_HOST)
+              hint=" (np: staging.example.com)"
+              ;;
+            PROD_HOST)
+              hint=" (np: prod.example.com)"
+              ;;
+            DEPLOY_USER)
+              hint=" (np: deploy)"
+              ;;
+          esac
+
+          printf "%s%s [%s]: " "$var" "$hint" "$val"
           read input
           new_val=${input:-$val}
-          if grep -q "^${var}=" .env; then
+
+          if grep -q "^${var}=" .env 2>/dev/null; then
             sed -i "s/^${var}=.*/${var}=${new_val}/" .env
           else
             echo "${var}=${new_val}" >> .env
           fi
         done
-        echo "✅ Hosty zapisane do .env"
+
+        echo ""
+        echo "✅ Hosty zapisane do .env:"
+        echo "   STAGING_HOST=$(grep "^STAGING_HOST=" .env | cut -d= -f2)"
+        echo "   PROD_HOST=$(grep "^PROD_HOST=" .env | cut -d= -f2)"
+        echo "   DEPLOY_USER=$(grep "^DEPLOY_USER=" .env | cut -d= -f2)"
+        echo ""
+        echo "🔧 Sprawdź: taskfile run doctor"
 
   generate:
     desc: "Generowanie kodu przez Aider"
     cmds:
       - |
+        # Load environment variables from .env
+        [ -f .env ] && export $(grep -v '^#' .env | xargs) 2>/dev/null || true
         [ -z "${OPENROUTER_API_KEY}" ] && echo "❌ Brak OPENROUTER_API_KEY w .env" && exit 1
+        # Auto-init if apps/ don't exist
+        if [ ! -d apps/web ] || [ ! -d apps/desktop ] || [ ! -d apps/landing ]; then
+          echo "⚠️  Brak struktury apps/ - uruchamiam init..."
+          taskfile run init
+        fi
         taskfile run generate-web
         taskfile run generate-desktop
         taskfile run generate-landing
-        "@fn notify" "Kod wygenerowany"
+      - "@fn notify Kod wygenerowany"
 
   generate-web:
     desc: "Generowanie FastAPI"
@@ -247,7 +541,7 @@ tasks:
       - "@remote systemctl --user restart ${PROJECT_NAME}-web.service 2>/dev/null || podman run -d --name ${PROJECT_NAME}-web --replace -p 8000:8000 ${IMAGE_WEB}:${TAG}"
       - "@remote systemctl --user restart ${PROJECT_NAME}-landing.service 2>/dev/null || podman run -d --name ${PROJECT_NAME}-landing --replace -p 3000:80 ${IMAGE_LANDING}:${TAG}"
       - "@fn health-check http://${SSH_HOST}/health"
-      - "@fn notify" "Deployment gotowy"
+      - "@fn notify Deployment gotowy"
 
   status:
     desc: "Status"
@@ -255,12 +549,43 @@ tasks:
       - "@fn health-check http://localhost:${PORT_WEB:-8000}/health"
 
   clean:
-    desc: "Czyszczenie"
+    desc: "Czyszczenie z wyborem - pyta co usunąć"
     cmds:
-      - docker compose down -v 2>/dev/null || true
-      - rm -rf apps/ prompts/ .venv/
-      - rm -f docker-compose.yml project.yml .env .gitignore .port-state.json Taskfile.yml
-      - echo "🧹 Wyczyszczono - pozostał tylko README.md"
+      - |
+        echo "🧹 Czyszczenie projektu"
+        echo ""
+        echo "Wybierz co usunąć:"
+        echo "  1) Tylko wygenerowane aplikacje (apps/)"
+        echo "  2) Aplikacje + środowisko (.venv/)"
+        echo "  3) Wszystko poza README.md (pełne reset)"
+        echo "  4) Anuluj"
+        echo ""
+        printf "Wybór (1-4): "
+        read CHOICE
+
+        case "$CHOICE" in
+          1)
+            echo "🗑️  Usuwam apps/..."
+            rm -rf apps/
+            echo "✅ Usunięto apps/"
+            ;;
+          2)
+            echo "🗑️  Usuwam apps/ i .venv/..."
+            rm -rf apps/ .venv/
+            echo "✅ Usunięto apps/ i .venv/"
+            echo "💡 Pliki konfiguracyjne (.env, prompts/) pozostały"
+            ;;
+          3)
+            echo "🗑️  Pełne czyszczenie..."
+            docker compose down -v 2>/dev/null || true
+            rm -rf apps/ prompts/ .venv/
+            rm -f docker-compose.yml project.yml .env .gitignore .port-state.json Taskfile.yml
+            echo "✅ Wyczyszczono - pozostał tylko README.md"
+            ;;
+          4|*)
+            echo "Anulowano."
+            ;;
+        esac
 ```
 
 ## Konfiguracja środowiska
@@ -516,8 +841,10 @@ taskfile run clean
 
 | Task | Opis |
 |------|------|
+| `doctor` | 🔧 Diagnostyka i autonaprawa (sprawdza .env, .venv, klucze) |
+| `setup env` / `run setup-env` | 🔐 Interaktywna konfiguracja .env - wybór LLM providera, API keys, porty |
+| `setup hosts` / `run setup-hosts` | 🌐 Pyta o hosty staging/prod z podpowiedziami, zapisuje do .env |
 | `init` | Tworzy strukturę katalogów, instaluje aider |
-| `setup-hosts` | Pyta o hosty staging/prod, zapisuje do .env |
 | `generate` | Generuje kod przez Aider (web, desktop, landing) |
 | `test` | Uruchamia pytest |
 | `build` | Buduje obrazy Docker |
