@@ -104,7 +104,7 @@ taskfile run deploy             # Interaktywny deployment
 
 ## Pliki projektu (markpact)
 
-### Taskfile.yml
+### Taskfile.yml — konfiguracja tasków
 
 ```markpact:file path=Taskfile.yml
 version: "1"
@@ -243,7 +243,7 @@ tasks:
     script: scripts/clean.sh
 ```
 
-### Skrypty
+### scripts/ — skrypty bash
 
 ```markpact:file path=scripts/doctor.sh
 #!/usr/bin/env bash
@@ -722,7 +722,7 @@ case "$CHOICE" in
 esac
 ```
 
-### .env — konfiguracja
+### .env — zmienne środowiskowe
 
 ```markpact:file path=.env
 PROJECT_NAME=taskfile-example
@@ -736,7 +736,7 @@ PROD_HOST=
 DEPLOY_USER=deploy
 ```
 
-### .gitignore
+### .gitignore — ignorowane pliki
 
 ```markpact:file path=.gitignore
 __pycache__/
@@ -750,7 +750,7 @@ dist/
 .env.prod
 ```
 
-### Prompty dla Aidera
+### prompts/ — prompty dla Aidera
 
 ```markpact:file path=prompts/web.md
 # Generate: SaaS Web Application (FastAPI)
@@ -791,7 +791,7 @@ Create static landing page in apps/landing/:
 Tech: Static HTML + TailwindCSS CDN + Nginx
 ```
 
-### docker-compose.yml
+### docker-compose.yml — konfiguracja Docker
 
 ```markpact:file path=docker-compose.yml
 version: "3.8"
