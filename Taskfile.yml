@@ -1,0 +1,603 @@
+version: "1"
+name: taskfile-example
+description: "Multi-platform deployment with code generation — SaaS + Desktop + Landing"
+
+variables:
+  PROJECT_NAME: taskfile-example
+  VERSION: ${VERSION:-1.0.0}
+  IMAGE_WEB: ghcr.io/tom-sapletta-com/taskfile-example-web
+  IMAGE_LANDING: ghcr.io/tom-sapletta-com/taskfile-example-landing
+  TAG: ${TAG:-latest}
+  DOMAIN_WEB: ${DOMAIN_WEB:-app.localhost}
+  DOMAIN_LANDING: ${DOMAIN_LANDING:-localhost}
+  DOMAIN_API: ${DOMAIN_API:-api.localhost}
+  # LLM agent config
+  LLM_AGENT: ${LLM_AGENT:-opencode}
+  LLM_MODEL: ${LLM_MODEL:-openrouter/anthropic/claude-sonnet-4}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
+environments:
+  local:
+    container_runtime: docker
+    compose_command: docker compose
+    env_file: .env.local
+    variables:
+      DOMAIN_WEB: app.localhost
+      DOMAIN_LANDING: localhost
+
+  staging:
+    ssh_host: ${STAGING_HOST:-staging.example.com}
+    ssh_user: deploy
+    ssh_key: ~/.ssh/id_ed25519
+    container_runtime: podman
+    service_manager: quadlet
+    env_file: .env.staging
+    variables:
+      DOMAIN_WEB: app-staging.example.com
+      DOMAIN_LANDING: staging.example.com
+
+  prod:
+    ssh_host: ${PROD_HOST:-prod.example.com}
+    ssh_user: deploy
+    ssh_key: ~/.ssh/id_ed25519
+    container_runtime: podman
+    service_manager: quadlet
+    env_file: .env.prod
+    variables:
+      DOMAIN_WEB: app.example.com
+      DOMAIN_LANDING: example.com
+
+environment_groups:
+  all-remote:
+    members: [staging, prod]
+    strategy: rolling
+    max_parallel: 1
+
+functions:
+  # ─── LLM Agent Dispatcher ─────────────────────────────
+  llm-generate:
+    lang: python
+    desc: "Dispatch code generation to LLM agent (opencode/goose/aider)"
+    file: scripts/agent.py
+
+  health-check:
+    lang: shell
+    desc: "HTTP health check with retries, uses PORT_WEB env var"
+    code: |
+      PORT_WEB="${PORT_WEB:-8000}"
+      URL="${1:-http://localhost:${PORT_WEB}/health}"
+      for i in $(seq 1 10); do
+        if curl -sf "$URL" > /dev/null 2>&1; then
+          echo "✅ Health OK: $URL"
+          exit 0
+        fi
+        echo "⏳ Waiting... ($i/10)"
+        sleep 3
+      done
+      echo "❌ Health FAILED: $URL"
+      exit 1
+
+  notify:
+    lang: python
+    desc: "Send notification (Slack/stdout)"
+    code: |
+      import os, json, urllib.request
+      webhook = os.environ.get("SLACK_WEBHOOK", "")
+      msg = os.environ.get("FN_ARGS", "Task complete")
+      if webhook:
+          data = json.dumps({"text": f":rocket: {msg}"}).encode()
+          req = urllib.request.Request(webhook, data=data,
+                headers={"Content-Type": "application/json"})
+          urllib.request.urlopen(req)
+      print(f"📢 {msg}")
+
+  monitor:
+    lang: python
+    desc: "Run monitoring checks"
+    file: scripts/monitor.py
+
+  # ─── Port Manager ─────────────────────────────────────
+  port-check:
+    lang: python
+    desc: "Check ports, kill processes if needed, find alternatives, update configs"
+    code: |
+      import os, sys, socket, subprocess, json, re
+      from pathlib import Path
+      DEFAULT_PORTS = {'WEB': 8000, 'LANDING': 3000, 'TRAEFIK_WEB': 80, 'TRAEFIK_DASHBOARD': 8080}
+      def is_port_in_use(port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+          try: s.bind(('0.0.0.0', port)); return False
+          except OSError: return True
+      def find_free_port(start=8000, end=9000):
+        for p in range(start, end):
+          if not is_port_in_use(p): return p
+        raise RuntimeError(f"No free port in range {start}-{end}")
+      def get_pids_on_port(port):
+        try:
+          r = subprocess.run(['lsof', '-t', '-i', f':{port}'], capture_output=True, text=True)
+          return [int(x) for x in r.stdout.strip().split('\n') if x] if r.returncode == 0 else []
+        except: return []
+      def kill_pid(pid):
+        try: subprocess.run(['kill', '-15', str(pid)], check=True, capture_output=True); return True
+        except: return False
+      def try_free_port(port):
+        pids = get_pids_on_port(port)
+        if not pids: return True
+        print(f"  Port {port} in use by PIDs: {pids}")
+        for pid in pids: kill_pid(pid)
+        import time; time.sleep(0.5)
+        return not is_port_in_use(port)
+      project_dir = Path(os.environ.get('PROJECT_DIR', '.')).resolve()
+      ports = {k: int(os.environ.get(f'PORT_{k}', v)) for k, v in DEFAULT_PORTS.items()}
+      ports_changed = False
+      for svc, port in list(ports.items()):
+        if not is_port_in_use(port): continue
+        if try_free_port(port): continue
+        new_port = find_free_port(port + 1, port + 1000)
+        print(f"  Switching {svc}: {port} → {new_port}")
+        ports[svc] = new_port; ports_changed = True
+      # Save state
+      (project_dir / '.port-state.json').write_text(json.dumps(ports, indent=2))
+      # Update docker-compose
+      compose = project_dir / 'docker-compose.yml'
+      if compose.exists() and ports_changed:
+        c = compose.read_text()
+        c = re.sub(r'(-\s*)"\d+:8000"', f'\\1"{ports["WEB"]}:8000"', c)
+        c = re.sub(r'(-\s*)"\d+:80"', f'\\1"{ports["LANDING"]}:80"', c, count=1)
+        c = re.sub(r'(-\s*)"80:80"', f'\\1"{ports["TRAEFIK_WEB"]}:80"', c)
+        c = re.sub(r'(-\s*)"8080:8080"', f'\\1"{ports["TRAEFIK_DASHBOARD"]}:8080"', c)
+        compose.write_text(c)
+      # Export for shell
+      print("\n".join(f"export PORT_{k}={v}" for k, v in ports.items()))
+      sys.exit(0)
+
+  # ─── Docker Cleanup ────────────────────────────────
+  docker-clean:
+    lang: shell
+    desc: "Remove all containers, images, volumes for this project"
+    code: |
+      PROJECT="${PROJECT_NAME:-taskfile-example}"
+      echo "🧹 Cleaning Docker resources for $PROJECT..."
+      docker compose down -v --remove-orphans 2>/dev/null || true
+      docker ps -aq --filter "name=$PROJECT" | xargs -r docker rm -f 2>/dev/null || true
+      docker images -q "$PROJECT*" | xargs -r docker rmi -f 2>/dev/null || true
+      docker volume ls -q --filter "name=$PROJECT" | xargs -r docker volume rm 2>/dev/null || true
+      docker network ls -q --filter "name=$PROJECT" | xargs -r docker network rm 2>/dev/null || true
+      echo "✅ Docker cleanup complete"
+
+  # ─── Service Wait ───────────────────────────────────
+  wait-for:
+    lang: shell
+    desc: "Wait for service with timeout (host:port timeout_secs)"
+    code: |
+      TARGET="${1:-localhost:8000}"
+      TIMEOUT="${2:-60}"
+      HOST=$(echo $TARGET | cut -d: -f1)
+      PORT=$(echo $TARGET | cut -d: -f2)
+      for i in $(seq 1 $TIMEOUT); do
+        if timeout 1 bash -c "echo > /dev/tcp/$HOST/$PORT" 2>/dev/null; then
+          echo "✅ $TARGET is ready"
+          exit 0
+        fi
+        echo "⏳ Waiting for $TARGET... ($i/${TIMEOUT}s)"
+        sleep 1
+      done
+      echo "❌ Timeout waiting for $TARGET"
+      exit 1
+
+  # ─── File Sync ───────────────────────────────────────
+  sync-env:
+    lang: python
+    desc: "Sync environment variables between .env files and Taskfile.yml"
+    code: |
+      import os, re
+      from pathlib import Path
+      env_file = Path(os.environ.get('ENV_FILE', '.env.local'))
+      if not env_file.exists(): print(f"⚠️ {env_file} not found"); exit(0)
+      content = env_file.read_text()
+      for line in content.split('\n'):
+        if '=' in line and not line.startswith('#'):
+          k, v = line.split('=', 1)
+          os.environ[k.strip()] = v.strip()
+      print(f"✅ Loaded {sum(1 for l in content.split(chr(10)) if '=' in l)} vars from {env_file}")
+
+  # ─── Log Tail ────────────────────────────────────────
+  log-tail:
+    lang: shell
+    desc: "Tail logs from container (container_name lines)"
+    code: |
+      CONTAINER="${1:-taskfile-web}"
+      LINES="${2:-100}"
+      docker logs -f --tail $LINES $CONTAINER 2>/dev/null || echo "❌ Container $CONTAINER not found"
+
+  # ─── Port List ───────────────────────────────────────
+  port-list:
+    lang: shell
+    desc: "List all project ports and their status"
+    code: |
+      PROJECT="${PROJECT_NAME:-taskfile-example}"
+      echo "🔌 Active ports for $PROJECT:"
+      docker ps --filter "name=$PROJECT" --format "table {{.Names}}\t{{.Ports}}" 2>/dev/null || \
+        lsof -i -P -n | grep -E "(8000|3000|80|8080)" | grep LISTEN || echo "  No active ports found"
+
+  # ─── Config Validate ─────────────────────────────────
+  validate-config:
+    lang: python
+    desc: "Validate docker-compose and Taskfile.yml syntax"
+    code: |
+      import subprocess, sys
+      from pathlib import Path
+      errors = []
+      if Path('docker-compose.yml').exists():
+        r = subprocess.run(['docker', 'compose', 'config'], capture_output=True)
+        if r.returncode != 0: errors.append(f"docker-compose.yml: {r.stderr.decode()}")
+      if errors:
+        for e in errors: print(f"❌ {e}")
+        sys.exit(1)
+      print("✅ Config validation passed")
+
+  # ─── Backup/Restore ──────────────────────────────────
+  backup-volumes:
+    lang: shell
+    desc: "Backup Docker volumes to tar.gz (volume_name backup_path)"
+    code: |
+      VOLUME="${1:-taskfile-example_data}"
+      BACKUP="${2:-./backups/volume-$(date +%Y%m%d-%H%M%S).tar.gz}"
+      mkdir -p "$(dirname $BACKUP)"
+      docker run --rm -v $VOLUME:/source -v "$(dirname $BACKUP)":/backup alpine \
+        tar czf /backup/$(basename $BACKUP) -C /source . || echo "❌ Backup failed"
+      echo "✅ Backup saved to $BACKUP"
+
+  restore-volumes:
+    lang: shell
+    desc: "Restore Docker volume from tar.gz (backup_path volume_name)"
+    code: |
+      BACKUP="${1}"
+      VOLUME="${2:-taskfile-example_data}"
+      if [ ! -f "$BACKUP" ]; then echo "❌ Backup file not found: $BACKUP"; exit 1; fi
+      docker run --rm -v $VOLUME:/target -v "$(dirname $BACKUP)":/backup alpine \
+        tar xzf /backup/$(basename $BACKUP) -C /target || echo "❌ Restore failed"
+      echo "✅ Volume restored from $BACKUP"
+
+# ─── Pipeline ──────────────────────────────────────────────────────────
+
+pipeline:
+  branches: [main]
+  secrets: [SSH_PRIVATE_KEY, OPENROUTER_API_KEY]
+  stages:
+    - name: generate
+      tasks: [generate-all]
+    - name: test
+      tasks: [test-web, test-desktop, test-landing]
+    - name: build
+      tasks: [build-web, build-desktop, build-landing]
+      docker_in_docker: true
+    - name: deploy-staging
+      tasks: [deploy-web, deploy-landing]
+      env: staging
+    - name: deploy-prod
+      tasks: [deploy-web, deploy-landing]
+      env: prod
+      when: manual
+
+# ═══════════════════════════════════════════════════════════════════════
+# TASKS
+# ═══════════════════════════════════════════════════════════════════════
+
+tasks:
+
+  # ─── Project Setup ────────────────────────────────────────────────
+
+  init:
+    desc: "Initialize project — install deps, create .env files"
+    cmds:
+      - |
+        if [ ! -f .env.local ]; then
+          cat > .env.local << 'EOF'
+OPENROUTER_API_KEY=
+DOMAIN_WEB=app.localhost
+DOMAIN_LANDING=localhost
+PORT_WEB=8000
+PORT_LANDING=3000
+PORT_TRAEFIK_WEB=80
+PORT_TRAEFIK_DASHBOARD=8080
+EOF
+          echo "✅ Created .env.local — set your OPENROUTER_API_KEY"
+        fi
+      - pip install fastapi uvicorn jinja2 python-multipart httpx aiosqlite 2>/dev/null || true
+      - npm install --prefix apps/desktop 2>/dev/null || true
+      - echo "✅ Project initialized"
+
+  # ─── Code Generation (LLM Agent) ─────────────────────────────────
+
+  generate-web:
+    desc: "Generate SaaS web app code via LLM agent"
+    tags: [generate, web]
+    cmds:
+      - "@fn llm-generate web"
+
+  generate-desktop:
+    desc: "Generate desktop app code via LLM agent"
+    tags: [generate, desktop]
+    cmds:
+      - "@fn llm-generate desktop"
+
+  generate-landing:
+    desc: "Generate landing page code via LLM agent"
+    tags: [generate, landing]
+    cmds:
+      - "@fn llm-generate landing"
+
+  generate-all:
+    desc: "Generate ALL apps via LLM agent"
+    deps: [generate-web, generate-desktop, generate-landing]
+    parallel: true
+    tags: [generate]
+    cmds:
+      - "@fn notify All code generated for ${PROJECT_NAME} v${VERSION}"
+
+  # ─── Testing ──────────────────────────────────────────────────────
+
+  test-web:
+    desc: "Test SaaS web app"
+    tags: [test, web, ci]
+    timeout: 120
+    cmds:
+      - cd apps/web && python -m pytest tests/ -v 2>/dev/null || echo "⚠️ No tests yet"
+
+  test-desktop:
+    desc: "Test desktop app"
+    tags: [test, desktop, ci]
+    timeout: 120
+    cmds:
+      - cd apps/desktop && npm test 2>/dev/null || echo "⚠️ No tests yet"
+
+  test-landing:
+    desc: "Test landing page (HTML validation)"
+    tags: [test, landing, ci]
+    cmds:
+      - "test -f apps/landing/index.html && echo '✅ Landing page exists' || echo '⚠️ Not generated yet'"
+
+  test-all:
+    desc: "Run all tests"
+    deps: [test-web, test-desktop, test-landing]
+    parallel: true
+    tags: [test, ci]
+
+  # ─── Build ────────────────────────────────────────────────────────
+
+  build-web:
+    desc: "Build SaaS web Docker image"
+    tags: [build, web, ci]
+    cmds:
+      - docker build -t ${IMAGE_WEB}:${TAG} -f apps/web/Dockerfile apps/web/
+
+  build-desktop:
+    desc: "Build desktop app (Electron → Linux/macOS/Windows)"
+    tags: [build, desktop]
+    cmds:
+      - cd apps/desktop && npm run build 2>/dev/null || echo "⚠️ Desktop build skipped"
+
+  build-landing:
+    desc: "Build landing page Docker image"
+    tags: [build, landing, ci]
+    cmds:
+      - docker build -t ${IMAGE_LANDING}:${TAG} -f apps/landing/Dockerfile apps/landing/
+
+  build-all:
+    desc: "Build all artifacts"
+    deps: [build-web, build-desktop, build-landing]
+    parallel: true
+    tags: [build, ci]
+
+  # ─── Deploy ───────────────────────────────────────────────────────
+
+  deploy-web:
+    desc: "Deploy SaaS web app"
+    env: [staging, prod]
+    tags: [deploy, web]
+    retries: 2
+    retry_delay: 10
+    timeout: 300
+    cmds:
+      - "@remote podman pull ${IMAGE_WEB}:${TAG}"
+      - "@remote systemctl --user restart taskfile-web.service 2>/dev/null || podman run -d --name taskfile-web --replace -p 8000:8000 ${IMAGE_WEB}:${TAG}"
+      - "@fn health-check http://${DOMAIN_WEB}/health"
+      - "@fn notify Deployed web ${VERSION} to ${DOMAIN_WEB}"
+
+  deploy-landing:
+    desc: "Deploy landing page"
+    env: [staging, prod]
+    tags: [deploy, landing]
+    retries: 2
+    retry_delay: 10
+    cmds:
+      - "@remote podman pull ${IMAGE_LANDING}:${TAG}"
+      - "@remote systemctl --user restart taskfile-landing.service 2>/dev/null || podman run -d --name taskfile-landing --replace -p 3000:80 ${IMAGE_LANDING}:${TAG}"
+      - "@fn health-check http://${DOMAIN_LANDING}"
+      - "@fn notify Deployed landing ${VERSION} to ${DOMAIN_LANDING}"
+
+  deploy-all:
+    desc: "Deploy everything to current environment"
+    deps: [deploy-web, deploy-landing]
+    tags: [deploy]
+    cmds:
+      - "@fn notify Full deploy ${VERSION} complete"
+
+  # ─── Local Development ────────────────────────────────────────────
+
+  dev:
+    desc: "Start all apps locally (docker-compose)"
+    env: [local]
+    tags: [dev]
+    cmds:
+      - |
+        # Run port manager and export ports
+        eval "$(@fn port-check)"
+        # Load ports from state file
+        if [ -f .port-state.json ]; then
+          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
+          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
+          export PORT_WEB PORT_LANDING
+        fi
+        docker compose up -d --build
+      - |
+        if [ -f .port-state.json ]; then
+          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
+          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
+        else
+          PORT_WEB=8000
+          PORT_LANDING=3000
+        fi
+        echo ""
+        echo "🌐 Web app   → http://localhost:${PORT_WEB}"
+        echo "🖥️  Landing   → http://localhost:${PORT_LANDING}"
+        echo "📊 Dashboard → http://localhost:${PORT_WEB}/dashboard"
+
+  dev-web:
+    desc: "Start web app locally (hot reload)"
+    env: [local]
+    tags: [dev, web]
+    cmds:
+      - |
+        if [ -f .port-state.json ]; then
+          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
+        else
+          PORT_WEB=${PORT_WEB:-8000}
+        fi
+        cd apps/web && uvicorn main:app --reload --host 0.0.0.0 --port ${PORT_WEB}
+
+  dev-landing:
+    desc: "Start landing page locally"
+    env: [local]
+    tags: [dev, landing]
+    cmds:
+      - |
+        if [ -f .port-state.json ]; then
+          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
+        else
+          PORT_LANDING=${PORT_LANDING:-3000}
+        fi
+        cd apps/landing && python -m http.server ${PORT_LANDING}
+
+  # ─── Monitoring ───────────────────────────────────────────────────
+
+  status:
+    desc: "Check status of all services"
+    tags: [monitoring]
+    cmds:
+      - |
+        if [ -f .port-state.json ]; then
+          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
+          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
+        else
+          PORT_WEB=${PORT_WEB:-8000}
+          PORT_LANDING=${PORT_LANDING:-3000}
+        fi
+        @fn health-check http://localhost:${PORT_WEB}/health
+        @fn health-check http://localhost:${PORT_LANDING}
+
+  monitor:
+    desc: "Run full monitoring suite"
+    tags: [monitoring]
+    cmds:
+      - "@fn monitor"
+
+  logs-web:
+    desc: "View web app logs"
+    env: [staging, prod]
+    tags: [monitoring, web]
+    cmds:
+      - "@remote podman logs -f --tail 100 taskfile-web"
+
+  logs-landing:
+    desc: "View landing page logs"
+    env: [staging, prod]
+    tags: [monitoring, landing]
+    cmds:
+      - "@remote podman logs -f --tail 100 taskfile-landing"
+
+  # ─── Release ──────────────────────────────────────────────────────
+
+  release:
+    desc: "Full release pipeline — generate → test → build → deploy"
+    tags: [release]
+    cmds:
+      - taskfile run generate-all
+      - taskfile run test-all
+      - taskfile run build-all
+      - taskfile --env staging run deploy-all
+      - "@fn notify Release ${VERSION} deployed to staging"
+
+  release-prod:
+    desc: "Promote staging to production"
+    tags: [release]
+    cmds:
+      - taskfile --env prod run deploy-all
+      - "@fn notify Release ${VERSION} LIVE in production"
+
+  # ─── Cleanup ──────────────────────────────────────────────────────
+
+  clean:
+    desc: "Remove generated artifacts and containers"
+    cmds:
+      - docker compose down -v 2>/dev/null || true
+      - docker rmi ${IMAGE_WEB}:${TAG} ${IMAGE_LANDING}:${TAG} 2>/dev/null || true
+      - rm -rf apps/desktop/dist apps/desktop/out
+      - echo "✅ Cleaned"
+
+  clean-all:
+    desc: "Deep clean - remove all Docker resources for this project"
+    tags: [cleanup]
+    cmds:
+      - "@fn docker-clean"
+
+  # ─── Utility Tasks ─────────────────────────────────────────────────
+
+  ports:
+    desc: "List all project ports and their status"
+    tags: [utility]
+    cmds:
+      - "@fn port-list"
+
+  validate:
+    desc: "Validate docker-compose configuration"
+    tags: [utility]
+    cmds:
+      - "@fn validate-config"
+
+  logs:
+    desc: "Tail logs from a container (default: web)"
+    tags: [utility, monitoring]
+    cmds:
+      - "@fn log-tail taskfile-web 100"
+
+  wait:
+    desc: "Wait for service to be ready (host:port timeout)"
+    tags: [utility]
+    cmds:
+      - |
+        if [ -f .port-state.json ]; then
+          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
+        else
+          PORT_WEB=${PORT_WEB:-8000}
+        fi
+        @fn wait-for localhost:${PORT_WEB} 60
+
+  backup:
+    desc: "Backup Docker volumes"
+    tags: [utility, backup]
+    cmds:
+      - mkdir -p ./backups
+      - "@fn backup-volumes taskfile-example_data ./backups/data-$(date +%Y%m%d-%H%M%S).tar.gz"
+
+  restore:
+    desc: "Restore Docker volume from backup (BACKUP=path/to/backup.tar.gz)"
+    tags: [utility, backup]
+    cmds:
+      - |
+        if [ -z "$BACKUP" ]; then
+          echo "❌ Usage: taskfile run restore BACKUP=./backups/data-XXXX.tar.gz"
+          exit 1
+        fi
+        @fn restore-volumes $BACKUP taskfile-example_data

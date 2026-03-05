@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: taskfile-web
+    ports:
+      - "${PORT_WEB:-8000}:8000"
+    environment:
+      - VERSION=${VERSION:-1.0.0}
+      - DOMAIN_WEB=${DOMAIN_WEB:-app.localhost}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  landing:
+    build:
+      context: ./apps/landing
+      dockerfile: Dockerfile
+    container_name: taskfile-landing
+    ports:
+      - "${PORT_LANDING:-3000}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:80"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  traefik:
+    image: traefik:v2.10
+    container_name: taskfile-traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "${PORT_TRAEFIK_WEB:-80}:80"
+      - "${PORT_TRAEFIK_DASHBOARD:-8080}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped

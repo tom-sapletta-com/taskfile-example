@@ -1,0 +1,83 @@
+# ─── Project Contract ──────────────────────────────────────────────────
+# This file describes WHAT to build. The Taskfile.yml describes HOW.
+# An LLM agent reads this spec and generates the code.
+
+project:
+  name: taskfile-example
+  description: "Multi-platform SaaS app with desktop client and landing page"
+  author: tom-sapletta-com
+  license: MIT
+  version: "1.0.0"
+
+# ─── Applications ─────────────────────────────────────────────────────
+
+apps:
+  web:
+    type: saas
+    framework: fastapi
+    language: python
+    description: "SaaS web application — REST API + dashboard"
+    features:
+      - User authentication (JWT)
+      - Dashboard with project stats
+      - REST API for desktop client
+      - Health endpoint (/health)
+      - WebSocket live updates
+    port: 8000
+    database: sqlite
+    ui: htmx + tailwindcss
+
+  desktop:
+    type: electron
+    framework: electron
+    language: typescript
+    description: "Desktop application — connects to SaaS API"
+    features:
+      - System tray icon
+      - Auto-update from landing page
+      - Connect to SaaS API
+      - Offline mode with local SQLite
+      - Cross-platform (Linux, macOS, Windows)
+    platforms: [linux, macos, windows]
+
+  landing:
+    type: static
+    framework: html
+    language: html+css+js
+    description: "Landing/offer page — download desktop app, SaaS signup"
+    features:
+      - Hero section with product description
+      - Download buttons (Linux, macOS, Windows)
+      - SaaS signup/login link
+      - Pricing section
+      - Changelog/releases section
+    port: 3000
+
+# ─── Deployment Targets ───────────────────────────────────────────────
+
+deployment:
+  local:
+    type: docker-compose
+    description: "All 3 apps running locally"
+
+  remote:
+    type: podman-quadlet
+    host: vps.example.com
+    user: deploy
+    description: "Production VPS with Podman + Traefik"
+
+  domains:
+    web: app.example.com
+    landing: example.com
+    api: api.example.com
+
+# ─── Monitoring ───────────────────────────────────────────────────────
+
+monitoring:
+  health_checks:
+    - url: "${DOMAIN_WEB}/health"
+      interval: 60
+    - url: "${DOMAIN_LANDING}"
+      interval: 300
+  alerts:
+    slack_webhook: "${SLACK_WEBHOOK}"

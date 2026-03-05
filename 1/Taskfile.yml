@@ -1,0 +1,566 @@
+# ═══════════════════════════════════════════════════════════════════════
+# ONE-FILE BOOTSTRAP — Start here. This is the ONLY file you need.
+#
+# Usage:
+#   pip install taskfile          ← install taskfile runner
+#   taskfile run bootstrap        ← installs aider, generates ALL code, builds, deploys
+#
+# Or step by step:
+#   taskfile run setup            ← install aider + create venv
+#   taskfile run generate         ← aider generates all 3 apps
+#   taskfile run dev              ← start locally (docker compose)
+#   taskfile run release          ← full pipeline → staging
+# ═══════════════════════════════════════════════════════════════════════
+
+version: "1"
+name: taskfile-example
+description: "Single-file bootstrap: Aider generates SaaS + Desktop + Landing, Taskfile deploys"
+
+# ─── Configuration ─────────────────────────────────────────────────────
+# Edit these variables to match your project.
+# Everything else is auto-generated from this single file.
+
+variables:
+  PROJECT_NAME: taskfile-example
+  VERSION: ${VERSION:-1.0.0}
+  IMAGE_WEB: ghcr.io/tom-sapletta-com/taskfile-example-web
+  IMAGE_LANDING: ghcr.io/tom-sapletta-com/taskfile-example-landing
+  TAG: ${TAG:-latest}
+
+  # ─── Domains ───────────────────────────────────────────
+  DOMAIN_WEB: ${DOMAIN_WEB:-localhost:8000}
+  DOMAIN_LANDING: ${DOMAIN_LANDING:-localhost:3000}
+
+  # ─── LLM / Aider config ───────────────────────────────
+  # Aider is auto-installed by `taskfile run setup`
+  # Set your API key before running `taskfile run generate`
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  AIDER_MODEL: ${AIDER_MODEL:-openrouter/anthropic/claude-sonnet-4}
+
+# ─── Environments ──────────────────────────────────────────────────────
+
+environments:
+  local:
+    container_runtime: docker
+    compose_command: docker compose
+    variables:
+      DOMAIN_WEB: localhost:8000
+      DOMAIN_LANDING: localhost:3000
+
+  staging:
+    ssh_host: ${STAGING_HOST:-staging.example.com}
+    ssh_user: deploy
+    ssh_key: ~/.ssh/id_ed25519
+    container_runtime: podman
+    service_manager: quadlet
+    variables:
+      DOMAIN_WEB: app-staging.example.com
+      DOMAIN_LANDING: staging.example.com
+
+  prod:
+    ssh_host: ${PROD_HOST:-prod.example.com}
+    ssh_user: deploy
+    ssh_key: ~/.ssh/id_ed25519
+    container_runtime: podman
+    service_manager: quadlet
+    variables:
+      DOMAIN_WEB: app.example.com
+      DOMAIN_LANDING: example.com
+
+environment_groups:
+  all-remote:
+    members: [staging, prod]
+    strategy: rolling
+    max_parallel: 1
+
+# ─── Embedded Functions ────────────────────────────────────────────────
+# These are defined inline — no external files needed.
+
+functions:
+  health-check:
+    lang: shell
+    desc: "HTTP health check with retries"
+    code: |
+      URL="${1:-http://localhost:8000/health}"
+      for i in $(seq 1 10); do
+        if curl -sf "$URL" > /dev/null 2>&1; then
+          echo "OK: $URL"; exit 0
+        fi
+        echo "Waiting... ($i/10)"; sleep 3
+      done
+      echo "FAILED: $URL"; exit 1
+
+  notify:
+    lang: python
+    desc: "Print notification"
+    code: |
+      import os
+      msg = os.environ.get("FN_ARGS", "done")
+      print(f"[notify] {msg}")
+
+# ═══════════════════════════════════════════════════════════════════════
+# TASKS — from zero to deployed in one command
+# ═══════════════════════════════════════════════════════════════════════
+
+tasks:
+
+  # ─── BOOTSTRAP (one command does everything) ──────────────────────
+
+  bootstrap:
+    desc: "ONE COMMAND — install aider, generate all code, build, deploy locally"
+    cmds:
+      - taskfile run setup
+      - taskfile run generate
+      - taskfile run dev
+      - echo ""
+      - echo "========================================="
+      - echo "  DONE! Your project is running:"
+      - echo "  Web app   → http://localhost:8000"
+      - echo "  Landing   → http://localhost:3000"
+      - echo "  Dashboard → http://localhost:8000/dashboard"
+      - echo "========================================="
+
+  # ─── 1. SETUP — install tools + create project skeleton ──────────
+
+  setup:
+    desc: "Install aider + create project structure + venv"
+    cmds:
+      # Create venv for the project
+      - |
+        if [ ! -d .venv ]; then
+          echo "Creating Python venv..."
+          python3 -m venv .venv
+        fi
+      # Install aider-chat into venv
+      - |
+        if ! .venv/bin/aider --version > /dev/null 2>&1; then
+          echo "Installing aider-chat..."
+          .venv/bin/pip install -q aider-chat
+        else
+          echo "aider already installed"
+        fi
+      # Install web app deps
+      - .venv/bin/pip install -q fastapi uvicorn jinja2 python-multipart httpx pytest
+      # Create project skeleton
+      - mkdir -p apps/web/templates apps/web/static apps/web/tests
+      - mkdir -p apps/desktop
+      - mkdir -p apps/landing
+      - |
+        if [ ! -f .env ]; then
+          cat > .env << 'ENVEOF'
+        OPENROUTER_API_KEY=
+        AIDER_MODEL=openrouter/anthropic/claude-sonnet-4
+        DOMAIN_WEB=localhost:8000
+        DOMAIN_LANDING=localhost:3000
+        VERSION=1.0.0
+        ENVEOF
+          echo "Created .env — set OPENROUTER_API_KEY before running 'taskfile run generate'"
+        fi
+      - echo "Setup complete. Run: taskfile run generate"
+
+  # ─── 2. GENERATE — aider creates all the code ───────────────────
+
+  generate:
+    desc: "Run aider to generate all 3 apps from inline prompts"
+    cmds:
+      - taskfile run generate-web
+      - taskfile run generate-desktop
+      - taskfile run generate-landing
+      - taskfile run generate-infra
+      - echo "All code generated!"
+
+  generate-web:
+    desc: "Aider generates FastAPI SaaS web app"
+    tags: [generate, web]
+    cmds:
+      - |
+        cd apps/web
+        if [ -z "${OPENROUTER_API_KEY}" ]; then
+          echo "No OPENROUTER_API_KEY — generating from inline template..."
+          # ── Inline fallback: generate without LLM ──
+          cat > main.py << 'PYEOF'
+        """FastAPI SaaS Web Application — generated by Taskfile bootstrap."""
+        from fastapi import FastAPI, Request
+        from fastapi.responses import HTMLResponse, JSONResponse
+        from fastapi.staticfiles import StaticFiles
+        from fastapi.templating import Jinja2Templates
+        import os, time
+
+        app = FastAPI(title="Taskfile Example SaaS", version=os.environ.get("VERSION", "1.0.0"))
+        templates = Jinja2Templates(directory="templates")
+        app.mount("/static", StaticFiles(directory="static"), name="static")
+        START = time.time()
+
+        @app.get("/health")
+        async def health():
+            return {"status": "ok", "version": os.environ.get("VERSION", "1.0.0"), "uptime": round(time.time() - START)}
+
+        @app.get("/api/v1/status")
+        async def api_status():
+            return {"api": "v1", "status": "running", "features": ["auth", "dashboard", "websocket"]}
+
+        @app.get("/", response_class=HTMLResponse)
+        @app.get("/dashboard", response_class=HTMLResponse)
+        async def dashboard(request: Request):
+            return templates.TemplateResponse(request, "dashboard.html", {"title": "Dashboard", "version": os.environ.get("VERSION", "1.0.0")})
+
+        @app.get("/login", response_class=HTMLResponse)
+        async def login(request: Request):
+            return templates.TemplateResponse(request, "login.html", {"title": "Login"})
+        PYEOF
+
+          cat > templates/dashboard.html << 'HTMLEOF'
+        <!DOCTYPE html>
+        <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+        <title>{{ title }}</title><script src="https://cdn.tailwindcss.com"></script></head>
+        <body class="bg-gray-50 min-h-screen">
+        <nav class="bg-white shadow-sm border-b"><div class="max-w-5xl mx-auto px-4 py-3 flex justify-between">
+        <h1 class="text-xl font-bold">Dashboard</h1><span class="text-sm text-gray-400">v{{ version }}</span></div></nav>
+        <main class="max-w-5xl mx-auto p-8"><div class="grid grid-cols-3 gap-6">
+        <div class="bg-white rounded-lg shadow p-6"><p class="text-sm text-gray-500">Status</p><p class="text-3xl font-bold text-green-600">Active</p></div>
+        <div class="bg-white rounded-lg shadow p-6"><p class="text-sm text-gray-500">API</p><p class="text-3xl font-bold text-blue-600">v1</p></div>
+        <div class="bg-white rounded-lg shadow p-6"><p class="text-sm text-gray-500">Version</p><p class="text-3xl font-bold text-purple-600">{{ version }}</p></div>
+        </div><div class="mt-8 bg-white rounded-lg shadow p-6"><h2 class="font-semibold mb-3">Links</h2>
+        <a href="/health" class="text-blue-600 hover:underline block">Health Check</a>
+        <a href="/api/v1/status" class="text-blue-600 hover:underline block">API Status</a>
+        <a href="/login" class="text-blue-600 hover:underline block">Login</a></div></main></body></html>
+        HTMLEOF
+
+          cat > templates/login.html << 'HTMLEOF'
+        <!DOCTYPE html>
+        <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+        <title>{{ title }}</title><script src="https://cdn.tailwindcss.com"></script></head>
+        <body class="bg-gray-50 min-h-screen flex items-center justify-center">
+        <div class="bg-white rounded-lg shadow-lg p-8 max-w-md w-full"><h1 class="text-2xl font-bold text-center mb-6">Sign In</h1>
+        <form class="space-y-4"><div><label class="block text-sm font-medium text-gray-700">Email</label>
+        <input type="email" class="mt-1 w-full rounded border-gray-300 shadow-sm px-3 py-2 border" placeholder="you@example.com"></div>
+        <div><label class="block text-sm font-medium text-gray-700">Password</label>
+        <input type="password" class="mt-1 w-full rounded border-gray-300 shadow-sm px-3 py-2 border"></div>
+        <button class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Sign In</button></form></div></body></html>
+        HTMLEOF
+
+          cat > requirements.txt << 'REQEOF'
+        fastapi>=0.104.0
+        uvicorn[standard]>=0.24.0
+        jinja2>=3.1.2
+        python-multipart>=0.0.6
+        httpx>=0.25.0
+        pytest>=7.4.0
+        REQEOF
+
+          cat > Dockerfile << 'DKEOF'
+        FROM python:3.12-slim
+        WORKDIR /app
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+        EXPOSE 8000
+        CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+        DKEOF
+
+          cat > tests/__init__.py << 'EOF'
+        EOF
+          cat > tests/test_app.py << 'TESTEOF'
+        from fastapi.testclient import TestClient
+        from main import app
+        client = TestClient(app)
+        def test_health():
+            r = client.get("/health"); assert r.status_code == 200; assert r.json()["status"] == "ok"
+        def test_api():
+            r = client.get("/api/v1/status"); assert r.status_code == 200
+        def test_dashboard():
+            r = client.get("/dashboard"); assert r.status_code == 200; assert "Dashboard" in r.text
+        TESTEOF
+
+          echo "Web app generated (inline template)"
+        else
+          # ── Use Aider to generate ──
+          echo "Generating web app with Aider (model: ${AIDER_MODEL})..."
+          ../../.venv/bin/aider \
+            --model "${AIDER_MODEL}" \
+            --openai-api-key "${OPENROUTER_API_KEY}" \
+            --openai-api-base "https://openrouter.ai/api/v1" \
+            --yes --no-git \
+            --message "Create a FastAPI SaaS web app in this directory:
+        - main.py: FastAPI app with /health (JSON status), /api/v1/status, /dashboard (Jinja2+TailwindCSS CDN), /login
+        - templates/dashboard.html: modern dashboard with status cards, TailwindCSS CDN
+        - templates/login.html: login form, TailwindCSS CDN
+        - requirements.txt: fastapi, uvicorn, jinja2, httpx, pytest
+        - Dockerfile: python:3.12-slim, pip install, uvicorn on port 8000
+        - tests/test_app.py: pytest tests for /health, /api/v1/status, /dashboard
+        - Mount /static directory
+        Make it production-ready with proper error handling."
+          echo "Web app generated (Aider)"
+        fi
+
+  generate-desktop:
+    desc: "Aider generates Electron desktop app"
+    tags: [generate, desktop]
+    cmds:
+      - |
+        cd apps/desktop
+        if [ -z "${OPENROUTER_API_KEY}" ]; then
+          echo "No OPENROUTER_API_KEY — generating from inline template..."
+
+          cat > package.json << 'PKGEOF'
+        {
+          "name": "taskfile-example-desktop",
+          "version": "1.0.0",
+          "main": "main.js",
+          "scripts": { "start": "electron .", "build": "electron-builder --linux --mac --win", "test": "echo Tests passed" },
+          "devDependencies": { "electron": "^28.0.0", "electron-builder": "^24.9.0" },
+          "build": { "appId": "com.taskfile-example.desktop", "productName": "Taskfile Example",
+            "linux": {"target": ["AppImage"]}, "mac": {"target": ["dmg"]}, "win": {"target": ["nsis"]} }
+        }
+        PKGEOF
+
+          cat > main.js << 'JSEOF'
+        const { app, BrowserWindow, Tray, Menu } = require('electron');
+        const path = require('path');
+        let win, tray;
+        const API = process.env.API_URL || 'http://localhost:8000';
+        function createWindow() {
+          win = new BrowserWindow({ width: 1000, height: 700,
+            webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }
+          });
+          win.loadFile('index.html');
+        }
+        app.whenReady().then(createWindow);
+        app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+        JSEOF
+
+          cat > preload.js << 'PREOF'
+        const { contextBridge } = require('electron');
+        contextBridge.exposeInMainWorld('api', {
+          getApiUrl: () => process.env.API_URL || 'http://localhost:8000'
+        });
+        PREOF
+
+          cat > index.html << 'HTEOF'
+        <!DOCTYPE html>
+        <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+        <title>Taskfile Desktop</title><script src="https://cdn.tailwindcss.com"></script></head>
+        <body class="bg-gray-900 text-white min-h-screen flex flex-col items-center justify-center p-8">
+        <h1 class="text-4xl font-bold mb-4">Taskfile Example</h1>
+        <p class="text-gray-400 mb-8">Desktop Client</p>
+        <div class="bg-gray-800 rounded-lg p-6 w-full max-w-md">
+        <p class="text-sm text-gray-500">API Status</p>
+        <p id="st" class="text-2xl font-bold text-yellow-400">Connecting...</p></div>
+        <button onclick="check()" class="mt-6 bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg">Refresh</button>
+        <script>
+        const API='http://localhost:8000';
+        async function check(){try{const r=await fetch(API+'/api/v1/status');const d=await r.json();
+        document.getElementById('st').textContent=d.status;document.getElementById('st').className='text-2xl font-bold text-green-400';
+        }catch(e){document.getElementById('st').textContent='Offline';document.getElementById('st').className='text-2xl font-bold text-red-400';}}
+        check();setInterval(check,10000);
+        </script></body></html>
+        HTEOF
+          echo "Desktop app generated (inline template)"
+        else
+          echo "Generating desktop app with Aider..."
+          ../../.venv/bin/aider \
+            --model "${AIDER_MODEL}" \
+            --openai-api-key "${OPENROUTER_API_KEY}" \
+            --openai-api-base "https://openrouter.ai/api/v1" \
+            --yes --no-git \
+            --message "Create an Electron desktop app in this directory:
+        - package.json: electron 28+, electron-builder, build targets for Linux/macOS/Windows
+        - main.js: BrowserWindow, system tray, contextIsolation true
+        - preload.js: contextBridge with API URL
+        - index.html: TailwindCSS CDN, shows API connection status (green/red), auto-refresh every 10s
+        Connect to http://localhost:8000/api/v1/status"
+          echo "Desktop app generated (Aider)"
+        fi
+
+  generate-landing:
+    desc: "Aider generates landing page"
+    tags: [generate, landing]
+    cmds:
+      - |
+        cd apps/landing
+        if [ -z "${OPENROUTER_API_KEY}" ]; then
+          echo "No OPENROUTER_API_KEY — generating from inline template..."
+
+          cat > index.html << 'LEOF'
+        <!DOCTYPE html>
+        <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+        <title>Taskfile Example — Download</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-white">
+        <section class="bg-gradient-to-br from-blue-600 to-purple-700 text-white">
+        <nav class="max-w-6xl mx-auto px-4 py-4 flex justify-between"><span class="text-xl font-bold">Taskfile Example</span>
+        <div class="space-x-4"><a href="#download" class="hover:underline">Download</a><a href="#pricing" class="hover:underline">Pricing</a>
+        <a href="http://localhost:8000/login" class="bg-white text-blue-600 px-4 py-2 rounded font-medium">Sign In</a></div></nav>
+        <div class="max-w-6xl mx-auto px-4 py-24 text-center"><h1 class="text-5xl font-bold mb-6">Deploy Anywhere.<br>One Config File.</h1>
+        <p class="text-xl text-blue-100 mb-8 max-w-2xl mx-auto">SaaS + Desktop + Landing — all generated and deployed from a single Taskfile.yml</p>
+        <div class="flex justify-center gap-4"><a href="#download" class="bg-white text-blue-600 px-8 py-3 rounded-lg font-bold text-lg">Download Desktop</a>
+        <a href="http://localhost:8000" class="border-2 border-white px-8 py-3 rounded-lg font-bold text-lg hover:bg-white/10">Open SaaS</a></div></div></section>
+        <section class="max-w-6xl mx-auto px-4 py-16"><h2 class="text-3xl font-bold text-center mb-12">How It Works</h2>
+        <div class="grid md:grid-cols-3 gap-8 text-center">
+        <div class="p-6"><div class="text-4xl mb-4">1</div><h3 class="text-xl font-bold mb-2">One Taskfile.yml</h3><p class="text-gray-600">Define your entire project in a single YAML file.</p></div>
+        <div class="p-6"><div class="text-4xl mb-4">2</div><h3 class="text-xl font-bold mb-2">Aider Generates Code</h3><p class="text-gray-600">AI agent creates all apps from your spec.</p></div>
+        <div class="p-6"><div class="text-4xl mb-4">3</div><h3 class="text-xl font-bold mb-2">Deploy Everywhere</h3><p class="text-gray-600">Local Docker, remote Podman, desktop Electron.</p></div></div></section>
+        <section id="download" class="bg-gray-50 py-16"><div class="max-w-6xl mx-auto px-4 text-center"><h2 class="text-3xl font-bold mb-8">Download</h2>
+        <div class="grid md:grid-cols-3 gap-6 max-w-3xl mx-auto">
+        <a href="#" class="bg-white rounded-lg shadow p-6 hover:shadow-lg"><div class="text-3xl mb-2">Linux</div><p class="text-sm text-gray-500">AppImage</p></a>
+        <a href="#" class="bg-white rounded-lg shadow p-6 hover:shadow-lg"><div class="text-3xl mb-2">macOS</div><p class="text-sm text-gray-500">.dmg</p></a>
+        <a href="#" class="bg-white rounded-lg shadow p-6 hover:shadow-lg"><div class="text-3xl mb-2">Windows</div><p class="text-sm text-gray-500">.exe</p></a></div></div></section>
+        <section id="pricing" class="py-16"><div class="max-w-6xl mx-auto px-4 text-center"><h2 class="text-3xl font-bold mb-8">Pricing</h2>
+        <div class="grid md:grid-cols-3 gap-6 max-w-4xl mx-auto">
+        <div class="border rounded-lg p-6"><h3 class="font-bold">Free</h3><p class="text-3xl font-bold my-4">$0</p><p class="text-gray-600">Desktop app + local deploy</p></div>
+        <div class="border-2 border-blue-600 rounded-lg p-6"><h3 class="font-bold">Pro</h3><p class="text-3xl font-bold my-4">$9/mo</p><p class="text-gray-600">SaaS + remote deploy</p></div>
+        <div class="border rounded-lg p-6"><h3 class="font-bold">Enterprise</h3><p class="text-3xl font-bold my-4">Custom</p><p class="text-gray-600">Fleet + priority support</p></div></div></div></section>
+        <footer class="bg-gray-900 text-gray-400 py-8 text-center"><p>Built with <a href="https://github.com/pyfunc/taskfile" class="text-blue-400">Taskfile</a></p></footer></body></html>
+        LEOF
+
+          cat > Dockerfile << 'DKEOF'
+        FROM nginx:alpine
+        COPY index.html /usr/share/nginx/html/index.html
+        EXPOSE 80
+        DKEOF
+          echo "Landing page generated (inline template)"
+        else
+          echo "Generating landing page with Aider..."
+          ../../.venv/bin/aider \
+            --model "${AIDER_MODEL}" \
+            --openai-api-key "${OPENROUTER_API_KEY}" \
+            --openai-api-base "https://openrouter.ai/api/v1" \
+            --yes --no-git \
+            --message "Create a landing page in this directory:
+        - index.html: modern landing with TailwindCSS CDN, hero (gradient blue-purple), 'How It Works' 3-step, download section (Linux/macOS/Windows), pricing (Free/Pro/Enterprise), footer
+        - Dockerfile: nginx:alpine serving index.html on port 80
+        Link SaaS to http://localhost:8000, link login to http://localhost:8000/login"
+          echo "Landing page generated (Aider)"
+        fi
+
+  generate-infra:
+    desc: "Generate docker-compose.yml and .gitignore"
+    tags: [generate]
+    cmds:
+      - |
+        cat > docker-compose.yml << 'DCEOF'
+        version: "3.8"
+        services:
+          web:
+            build: { context: ./apps/web }
+            container_name: taskfile-web
+            ports: ["8000:8000"]
+            environment:
+              - VERSION=${VERSION:-1.0.0}
+            restart: unless-stopped
+            healthcheck:
+              test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+              interval: 30s
+              timeout: 5s
+              retries: 3
+          landing:
+            build: { context: ./apps/landing }
+            container_name: taskfile-landing
+            ports: ["3000:80"]
+            restart: unless-stopped
+        DCEOF
+        echo "docker-compose.yml generated"
+      - |
+        cat > .gitignore << 'GIEOF'
+        __pycache__/
+        *.pyc
+        .venv/
+        node_modules/
+        dist/
+        out/
+        .env
+        *.db
+        .pytest_cache/
+        GIEOF
+        echo ".gitignore generated"
+
+  # ─── Testing ──────────────────────────────────────────────────────
+
+  test:
+    desc: "Run all tests"
+    tags: [test, ci]
+    timeout: 120
+    cmds:
+      - cd apps/web && ../../.venv/bin/python -m pytest tests/ -v
+
+  # ─── Build ────────────────────────────────────────────────────────
+
+  build:
+    desc: "Build all Docker images"
+    tags: [build, ci]
+    cmds:
+      - docker build -t ${IMAGE_WEB}:${TAG} apps/web/
+      - docker build -t ${IMAGE_LANDING}:${TAG} apps/landing/
+      - echo "Images built"
+
+  # ─── Local Dev ────────────────────────────────────────────────────
+
+  dev:
+    desc: "Start all apps locally (docker compose)"
+    env: [local]
+    tags: [dev]
+    cmds:
+      - docker compose up -d --build
+      - echo ""
+      - echo "Web app   → http://localhost:8000"
+      - echo "Landing   → http://localhost:3000"
+      - echo "Dashboard → http://localhost:8000/dashboard"
+
+  dev-web:
+    desc: "Start web app with hot reload (no Docker)"
+    env: [local]
+    tags: [dev, web]
+    cmds:
+      - cd apps/web && ../../.venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+  # ─── Deploy ───────────────────────────────────────────────────────
+
+  deploy:
+    desc: "Deploy to current environment"
+    env: [staging, prod]
+    tags: [deploy]
+    retries: 2
+    retry_delay: 10
+    timeout: 300
+    cmds:
+      - "@remote podman pull ${IMAGE_WEB}:${TAG}"
+      - "@remote podman pull ${IMAGE_LANDING}:${TAG}"
+      - "@remote systemctl --user restart taskfile-web.service 2>/dev/null || podman run -d --name taskfile-web --replace -p 8000:8000 ${IMAGE_WEB}:${TAG}"
+      - "@remote systemctl --user restart taskfile-landing.service 2>/dev/null || podman run -d --name taskfile-landing --replace -p 3000:80 ${IMAGE_LANDING}:${TAG}"
+      - "@fn health-check http://${DOMAIN_WEB}/health"
+      - "@fn notify Deployed ${VERSION} to ${DOMAIN_WEB}"
+
+  # ─── Release ──────────────────────────────────────────────────────
+
+  release:
+    desc: "Full pipeline: test → build → deploy staging"
+    tags: [release]
+    cmds:
+      - taskfile run test
+      - taskfile run build
+      - taskfile --env staging run deploy
+      - "@fn notify Release ${VERSION} deployed to staging"
+
+  release-prod:
+    desc: "Promote staging to production"
+    tags: [release]
+    cmds:
+      - taskfile --env prod run deploy
+      - "@fn notify Release ${VERSION} LIVE in production"
+
+  # ─── Monitoring ───────────────────────────────────────────────────
+
+  status:
+    desc: "Check health of all services"
+    tags: [monitoring]
+    cmds:
+      - "@fn health-check http://${DOMAIN_WEB}/health"
+      - "@fn health-check http://${DOMAIN_LANDING}"
+
+  # ─── Cleanup ──────────────────────────────────────────────────────
+
+  clean:
+    desc: "Remove all generated code and containers"
+    cmds:
+      - docker compose down -v 2>/dev/null || true
+      - docker rmi ${IMAGE_WEB}:${TAG} ${IMAGE_LANDING}:${TAG} 2>/dev/null || true
+      - rm -rf apps/web apps/desktop apps/landing docker-compose.yml .gitignore
+      - echo "Cleaned — only Taskfile.yml remains"

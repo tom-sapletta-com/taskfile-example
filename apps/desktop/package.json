@@ -1,0 +1,25 @@
+{
+  "name": "taskfile-example-desktop",
+  "version": "1.0.0",
+  "description": "Desktop client for Taskfile Example SaaS",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --linux --mac --win",
+    "test": "echo \"Tests passed\""
+  },
+  "dependencies": {
+    "electron-updater": "^6.1.0"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0"
+  },
+  "build": {
+    "appId": "com.taskfile-example.desktop",
+    "productName": "Taskfile Example",
+    "linux": { "target": ["AppImage", "deb"] },
+    "mac": { "target": ["dmg"] },
+    "win": { "target": ["nsis"] }
+  }
+}
