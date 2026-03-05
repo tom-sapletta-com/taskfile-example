@@ -14,12 +14,12 @@ cd sandbox
 taskfile init
 
 # 3. Konfiguracja (interaktywnie)
-taskfile setup env       # Konfiguruje .env, API keys
-taskfile setup hosts     # Konfiguruje hosty deploymentu
+taskfile run setup-env       # Konfiguruje .env, API keys
+taskfile run setup-hosts     # Konfiguruje hosty deploymentu
 
 # 4. Generowanie i uruchomienie
-taskfile generate   # Generuje kod przez Aider
-taskfile dev        # Start lokalny
+taskfile run generate   # Generuje kod przez Aider
+taskfile run dev        # Start lokalny
 ```
 
 ## 📋 Co to jest?
@@ -52,6 +52,7 @@ README.md (ten plik)
     │   ├── setup-hosts.sh
     │   ├── generate.sh
     │   ├── init.sh
+    │   ├── deploy.sh
     │   └── clean.sh
     ├── .env               → Konfiguracja (hosty, klucze, porty)
     ├── prompts/           → Prompty dla Aidera
@@ -70,40 +71,42 @@ cd sandbox                      # Wejdź do folderu
 taskfile init                   # Zainstaluj zależności
 
 # FAZA 2: Konfiguracja
-taskfile setup env              # Skonfiguruj .env
-taskfile setup hosts            # Dodaj hosty staging/prod
+taskfile run setup-env              # Skonfiguruj .env
+taskfile run setup-hosts            # Dodaj hosty staging/prod
 
 # FAZA 3: Generowanie kodu
-taskfile generate               # Generuj wszystko (web, desktop, landing)
+taskfile run generate               # Generuj wszystko (web, desktop, landing)
 
 # FAZA 4: Rozwój
-taskfile dev                    # Start lokalny
-taskfile dev-web                # Web z hot-reload
-taskfile test                   # Testy
+taskfile run dev                    # Start lokalny
+taskfile run dev-web                # Web z hot-reload
+taskfile run test                   # Testy
 
 # FAZA 5: Deployment
-taskfile build                  # Build Docker images
-taskfile deploy                 # Interaktywny deployment
+taskfile run build                  # Build Docker images
+taskfile run deploy                 # Interaktywny deployment
 ```
 
 ## 🔧 Taski dostępne po wypakowaniu
 
-| Task | Opis |
-|------|------|
-| `init` | Tworzy strukturę katalogów, instaluje zależności |
-| `setup env` | 🔐 Interaktywna konfiguracja .env (LLM provider, API keys, porty) |
-| `setup hosts` | 🌐 Konfiguracja hostów staging/prod |
-| `generate` | Generuje kod przez Aider (web, desktop, landing) |
-| `test` | Uruchamia pytest |
-| `build` | Buduje obrazy Docker |
-| `dev` | Startuje docker-compose lokalnie |
-| `deploy` | Interaktywny deployment do staging/prod |
-| `clean` | Czyści projekt (zostaje tylko README.md) |
+| Komenda | Opis |
+|---------|------|
+| `taskfile run init` | Tworzy strukturę katalogów, instaluje zależności |
+| `taskfile run setup-env` | 🔐 Konfiguracja .env (LLM provider, API keys, porty) |
+| `taskfile run setup-hosts` | 🌐 Konfiguracja hostów staging/prod |
+| `taskfile run generate` | Generuje kod przez Aider (web, desktop, landing) |
+| `taskfile run test` | Uruchamia pytest |
+| `taskfile run build` | Build Docker images |
+| `taskfile run dev` | Start lokalny z hot-reload |
+| `taskfile run deploy --env prod` | Deploy do staging/prod przez SSH |
+| `taskfile run logs` | Logi aplikacji (local/remote) |
+| `taskfile run status` | Status serwisów (local/remote) |
+| `taskfile run clean` | Czyszczenie projektu |
 
 **Wbudowane komendy CLI:**
-- `taskfile doctor` - Diagnostyka projektu
-- `taskfile list` - Lista tasków
-- `taskfile init` - Interaktywne tworzenie Taskfile
+- `taskfile doctor` — Diagnostyka projektu
+- `taskfile list` — Lista tasków
+- `taskfile validate` — Walidacja Taskfile.yml
 
 ---
 
@@ -113,148 +116,58 @@ taskfile deploy                 # Interaktywny deployment
 
 ```markpact:file path=Taskfile.yml
 version: "1"
-name: taskfile-example
-description: "Taskfile-driven project with Aider code generation"
+name: my-app
+description: Minimal Taskfile
 
 variables:
-  PROJECT_NAME: taskfile-example
-  VERSION: ${VERSION:-1.0.0}
-  IMAGE_WEB: ghcr.io/tom-sapletta-com/taskfile-example-web
-  IMAGE_LANDING: ghcr.io/tom-sapletta-com/taskfile-example-landing
-  TAG: ${TAG:-latest}
+  APP_NAME: my-app
 
 environments:
   local:
     container_runtime: docker
     compose_command: docker compose
-    env_file: .env
-
-  staging:
-    ssh_host: ${STAGING_HOST:-}
-    ssh_user: ${DEPLOY_USER:-deploy}
-    ssh_key: ~/.ssh/id_ed25519
-    container_runtime: podman
-    service_manager: quadlet
-    env_file: .env
 
   prod:
-    ssh_host: ${PROD_HOST:-}
-    ssh_user: ${DEPLOY_USER:-deploy}
-    ssh_key: ~/.ssh/id_ed25519
+    ssh_host: your-server.example.com
+    ssh_user: deploy
     container_runtime: podman
-    service_manager: quadlet
-    env_file: .env
-
-functions:
-  health-check:
-    lang: shell
-    code: |
-      URL="${1:-http://localhost:8000/health}"
-      for i in $(seq 1 10); do
-        curl -sf "$URL" > /dev/null 2>&1 && echo "OK: $URL" && exit 0
-        echo "Waiting... ($i/10)"; sleep 3
-      done
-      echo "FAILED: $URL"; exit 1
-
-  notify:
-    lang: python
-    code: |
-      import os
-      print(f"[notify] {os.environ.get('FN_ARGS', 'Done')}")
 
 tasks:
-  setup-env:
-    desc: "🔐 Interaktywna konfiguracja .env - LLM provider, API keys, porty"
-    script: scripts/setup-env.sh
-
-  setup-hosts:
-    desc: "Konfiguracja hostów deploymentu"
-    script: scripts/setup-hosts.sh
-
-  setup:
-    desc: "Konfiguracja projektu (env | hosts)"
-    cmds:
-      - |
-        if [ "${1:-}" = "env" ]; then
-          bash scripts/setup-env.sh
-        elif [ "${1:-}" = "hosts" ]; then
-          bash scripts/setup-hosts.sh
-        else
-          echo "Użycie: taskfile setup <env|hosts>"
-          exit 1
-        fi
-
-  init:
-    desc: "Inicjalizacja - tworzy strukturę, instaluje aider"
-    script: scripts/init.sh
-
-  generate:
-    desc: "Generowanie kodu przez Aider (all/web/desktop/landing)"
-    script: scripts/generate.sh
-
-  generate-web:
-    desc: "Generowanie FastAPI"
-    cmds:
-      - bash scripts/generate.sh web
-
-  generate-desktop:
-    desc: "Generowanie Electron"
-    cmds:
-      - bash scripts/generate.sh desktop
-
-  generate-landing:
-    desc: "Generowanie Landing"
-    cmds:
-      - bash scripts/generate.sh landing
-
-  test:
-    desc: "Testy"
-    cmds:
-      - cd apps/web && ../../.venv/bin/python -m pytest tests/ -v 2>/dev/null || echo "⚠️ Brak testów"
-
   build:
-    desc: "Build Docker"
+    desc: Build the application
     cmds:
-      - docker build -t ${IMAGE_WEB}:${TAG} apps/web/
-      - docker build -t ${IMAGE_LANDING}:${TAG} apps/landing/
-
-  dev:
-    desc: "Start lokalny"
-    env: [local]
-    cmds:
-      - docker compose up -d --build
-      - echo "🌐 http://localhost:${PORT_WEB:-8000} (web)"
-      - echo "🌐 http://localhost:${PORT_LANDING:-3000} (landing)"
-
-  dev-web:
-    desc: "Web z hot reload"
-    cmds:
-      - cd apps/web && ../../.venv/bin/uvicorn main:app --reload --host 0.0.0.0 --port ${PORT_WEB:-8000}
+      - ${COMPOSE} build
 
   deploy:
-    desc: "Deployment (interaktywny)"
-    script: scripts/deploy.sh
-
-  deploy-exec:
-    desc: "Wykonanie deploymentu"
-    env: [staging, prod]
-    retries: 2
-    retry_delay: 10
+    desc: Deploy to target environment
+    env: [local, prod]
+    deps: [build]
     cmds:
-      - |
-        echo "🚀 Deploying to ${SSH_HOST}..."
-        echo "💡 Run manually: ssh ${DEPLOY_USER}@${SSH_HOST} 'podman pull ${IMAGE_WEB}:${TAG}'"
-      - "@fn health-check http://${SSH_HOST}/health"
-      - echo "📢 Deployment gotowy"
+      - "@local ${COMPOSE} up -d"
+      - "@remote podman pull ${APP_NAME}:latest"
+      - "@remote podman run -d --name ${APP_NAME} --replace -p 8000:8000 ${APP_NAME}:latest"
+
+  dev:
+    desc: Start local development with hot-reload
+    env: [local]
+    cmds:
+      - ${COMPOSE} up -d --build
+      - echo "✅ Dev server running at http://localhost:${PORT_WEB:-8000}"
+      - ${COMPOSE} logs -f
+
+  logs:
+    desc: View application logs
+    env: [local, prod]
+    cmds:
+      - "@local ${COMPOSE} logs -f"
+      - "@remote podman logs ${APP_NAME} -f"
 
   status:
-    desc: "Status"
+    desc: Show running services
+    env: [local, prod]
     cmds:
-      - "@fn health-check http://localhost:${PORT_WEB:-8000}/health"
-
-  clean:
-    desc: "Czyszczenie z wyborem - pyta co usunąć"
-    script: scripts/clean.sh
+      - "@local ${COMPOSE} ps"
+      - "@remote podman ps --filter name=${APP_NAME}"
 ```
 
 ### scripts/ — skrypty bash
@@ -287,13 +200,13 @@ fi
 
 # Sprawdź czy prompts/ istnieją
 if [ ! -d prompts ]; then
-  echo "⚠️  Brak prompts/ - uruchom: taskfile init"
+  echo "⚠️  Brak prompts/ - uruchom: taskfile run init"
   ((ERRORS++))
 fi
 
 # Sprawdź czy .venv istnieje
 if [ ! -d .venv ]; then
-  echo "⚠️  Brak .venv - uruchom: taskfile init"
+  echo "⚠️  Brak .venv - uruchom: taskfile run init"
   ((ERRORS++))
 fi
 
@@ -302,7 +215,7 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   echo "⚠️  Brak OPENROUTER_API_KEY w .env"
   echo ""
   echo "   🔧 Rozwiązanie: Uruchom interaktywną konfigurację:"
-  echo "      taskfile setup env"
+  echo "      taskfile run setup-env"
   echo ""
   echo "   Lub ręcznie dodaj klucz:"
   echo "      echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env"
@@ -516,7 +429,7 @@ echo "   Provider: $PROVIDER"
 echo "   Model: $MODEL"
 echo "   Porty: $PORT_WEB (web), $PORT_LANDING (landing)"
 echo ""
-echo "🔧 Teraz uruchom: taskfile setup hosts"
+echo "🔧 Teraz uruchom: taskfile run setup-hosts"
 ```
 
 ```markpact:file path=scripts/setup-hosts.sh
@@ -539,6 +452,7 @@ echo "   User:    deploy, ubuntu, ec2-user"
 echo ""
 echo "   (Wciśnij Enter aby pominąć lub zachować obecną wartość)"
 echo ""
+
 
 for var in STAGING_HOST PROD_HOST DEPLOY_USER; do
   val=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2 || echo "")
@@ -595,7 +509,7 @@ find_aider() {
   elif command -v aider >/dev/null 2>&1; then
     echo "aider"
   else
-    echo "❌ Aider nie zainstalowany. Uruchom: taskfile init" >&2
+    echo "❌ Aider nie zainstalowany. Uruchom: taskfile run init" >&2
     echo "   Lub zainstaluj globalnie: pipx install aider-chat" >&2
     exit 1
   fi
@@ -633,7 +547,7 @@ case "$COMPONENT" in
     # Auto-init if apps/ don't exist
     if [ ! -d apps/web ] || [ ! -d apps/desktop ] || [ ! -d apps/landing ]; then
       echo "⚠️  Brak struktury apps/ - uruchamiam init..."
-      taskfile init
+      taskfile run init
     fi
     run_aider "web" "web.md"
     cd ../..
@@ -704,7 +618,7 @@ fi
   "1. index.html - Single page with TailwindCSS" \
   "2. Dockerfile - nginx:alpine" > prompts/landing.md
 
-echo "✅ Gotowe! Następne: taskfile setup hosts"
+echo "✅ Gotowe! Następne: taskfile run setup-hosts"
 ```
 
 ```markpact:file path=scripts/deploy.sh
@@ -784,6 +698,20 @@ PROD_HOST=
 DEPLOY_USER=deploy
 ```
 
+### .env.example — szablon zmiennych środowiskowych
+
+```markpact:file path=.env.example
+PROJECT_NAME=taskfile-example
+VERSION=1.0.0
+OPENROUTER_API_KEY=
+AIDER_MODEL=openrouter/anthropic/claude-sonnet-4
+PORT_WEB=8000
+PORT_LANDING=3000
+STAGING_HOST=
+PROD_HOST=
+DEPLOY_USER=deploy
+```
+
 ### .gitignore — ignorowane pliki
 
 ```markpact:file path=.gitignore
@@ -842,8 +770,6 @@ Tech: Static HTML + TailwindCSS CDN + Nginx
 ### docker-compose.yml — konfiguracja Docker
 
 ```markpact:file path=docker-compose.yml
-version: "3.8"
-
 services:
   web:
     build: ./apps/web
@@ -858,22 +784,44 @@ services:
       - "${PORT_LANDING:-3000}:80"
 ```
 
+### Dockerfile — obraz bazowy
+
+```markpact:file path=Dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt* ./
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+
+# Copy application code
+COPY . .
+
+# Default port
+ENV MARKPACT_PORT=8000
+EXPOSE 8000
+
+CMD ["python", "-m", "http.server", "8000"]
+```
+
 ---
 
 ## 📚 Dokumentacja Taskfile
 
 ```bash
-# Krótka składnia (nowe komendy CLI)
-taskfile setup env              # Konfiguracja .env
-taskfile setup hosts            # Konfiguracja hostów
-
-# Podstawowe operacje
+# Komendy wbudowane (CLI)
 taskfile init                   # Interaktywne tworzenie Taskfile
 taskfile list                   # Lista tasków
 taskfile doctor                 # Diagnostyka projektu
-taskfile <task>                 # Uruchom task bezpośrednio
+taskfile validate               # Walidacja Taskfile.yml
 
-# Nowe funkcje
+# Uruchamianie tasków
+taskfile run <task>             # Uruchom task
+taskfile run deploy --env prod  # Task z wybranym środowiskiem
+taskfile --dry-run run deploy   # Podgląd komend bez wykonania
+
+# Dodatkowe
 taskfile watch build            # Watch mode
 taskfile serve                  # Web UI
 taskfile cache show             # Cache stats
