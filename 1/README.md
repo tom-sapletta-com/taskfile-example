@@ -10,6 +10,7 @@ pip install markpact taskfile --upgrade
 
 # 2. Wypakowanie projektu
 markpact README.md
+cd sandbox
 
 # 3. Konfiguracja (interaktywnie)
 taskfile setup env      # Konfiguruje .env, API keys
