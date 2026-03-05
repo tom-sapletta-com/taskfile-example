@@ -210,7 +210,7 @@ __marimo__/
 
 # ─── Taskfile Example Project ─────────────────────────
 .env.staging
-.env.prod
+!.env.prod
 .env.local
 apps/desktop/node_modules/
 apps/desktop/dist/

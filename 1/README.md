@@ -30,16 +30,22 @@ README.md (ten plik)
     │   ├── doctor.sh
     │   ├── setup-env.sh
     │   ├── setup-hosts.sh
+    │   ├── setup-prod.sh  → Konfiguracja produkcji (SSH, podman)
     │   ├── generate.sh
     │   ├── init.sh
     │   ├── deploy.sh
     │   └── clean.sh
     ├── .env               → Konfiguracja (hosty, klucze, porty)
+    ├── .env.prod          → Konfiguracja produkcyjna
+    ├── Dockerfile         → Obraz bazowy (python:3.12-slim)
+    ├── docker-compose.yml → Konfiguracja Docker
     ├── prompts/           → Prompty dla Aidera
     │   ├── web.md
     │   ├── desktop.md
     │   └── landing.md
-    └── docker-compose.yml → Konfiguracja Docker
+    ├── apps/              → Wygenerowane aplikacje
+    ├── taskfile-prod.sh   → Skrót: status produkcji
+    └── VERSION            → Wersja projektu
 ```
 
 ## 🎯 Workflow
@@ -60,6 +66,7 @@ taskfile init
 # 4. Konfiguracja (interaktywnie)
 taskfile run setup-env       # Konfiguruje .env, API keys
 taskfile run setup-hosts     # Konfiguruje hosty deploymentu
+taskfile run setup-prod      # Konfiguruje produkcję (SSH, podman)
 ```
 
 ### Generowanie kodu i rozwój lokalny
@@ -123,9 +130,12 @@ taskfile --env prod run stop
 | `taskfile run init` | Tworzy strukturę katalogów, instaluje zależności |
 | `taskfile run setup-env` | 🔐 Konfiguracja .env (LLM provider, API keys, porty) |
 | `taskfile run setup-hosts` | 🌐 Konfiguracja hostów staging/prod |
+| `taskfile run setup-prod` | 🚀 Konfiguracja produkcji (SSH, podman, test połączenia) |
+| `taskfile run doctor` | Diagnostyka projektu |
 | `taskfile run generate` | Generuje kod przez Aider (web, desktop, landing) |
 | `taskfile run test` | Uruchamia pytest |
 | `taskfile run build` | Build Docker images |
+| `taskfile run push-images` | Transfer obrazów na serwer prod przez SSH |
 | `taskfile run dev` | Start lokalny z hot-reload |
 | `taskfile run deploy` | Deploy lokalny (`docker compose up -d`) |
 | `taskfile --env prod run deploy` | Deploy na prod (SSH → `podman pull/run`) |
@@ -135,7 +145,6 @@ taskfile --env prod run stop
 | `taskfile run clean` | Czyszczenie projektu |
 
 **Wbudowane komendy CLI:**
-- `taskfile doctor` — Diagnostyka projektu
 - `taskfile list` — Lista tasków
 - `taskfile validate` — Walidacja Taskfile.yml
 
@@ -151,9 +160,11 @@ name: my-app
 description: Example Taskfile — local Docker Compose + remote Podman deploy
 
 variables:
-  APP_NAME: ${PROJECT_NAME:-my-app}
+  APP_NAME: sandbox
   TAG: latest
-  REGISTRY: ${REGISTRY:-ghcr.io/your-org}
+  WEB_IMAGE: sandbox-web
+  LANDING_IMAGE: sandbox-landing
+  COMPOSE: docker compose
 
 environments:
   local:
@@ -162,28 +173,33 @@ environments:
 
   prod:
     ssh_host: ${PROD_HOST:-your-server.example.com}
-    ssh_user: ${DEPLOY_USER:-deploy}
+    ssh_user: ${DEPLOY_USER:-root}
     container_runtime: podman
 
 tasks:
   build:
-    desc: Build images
+    desc: Build Docker images locally
     cmds:
       - ${COMPOSE} build
+
+  push-images:
+    desc: Transfer Docker images to remote server via SSH
+    env: [prod]
+    cmds:
+      - echo "📦 Transferring ${WEB_IMAGE}:${TAG} → ${PROD_HOST}..."
+      - "docker save ${WEB_IMAGE}:${TAG} | ssh -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'"
+      - echo "📦 Transferring ${LANDING_IMAGE}:${TAG} → ${PROD_HOST}..."
+      - "docker save ${LANDING_IMAGE}:${TAG} | ssh -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'"
+      - echo "✅ Images transferred"
 
   deploy:
     desc: Deploy to target environment
     env: [local, prod]
-    deps: [build]
+    deps: [build, push-images]
     cmds:
       - "@local ${COMPOSE} up -d"
-      - |
-        @remote echo "📦 Transferring images to remote server..."
-        docker save ${REGISTRY}/sandbox-web:${TAG} | ssh -p 22 -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'
-        docker save ${REGISTRY}/sandbox-landing:${TAG} | ssh -p 22 -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'
-      - |
-        @remote podman run -d --name sandbox-web --replace -p ${PORT_WEB:-8000}:8000 ${REGISTRY}/sandbox-web:${TAG} || true
-        podman run -d --name sandbox-landing --replace -p ${PORT_LANDING:-3000}:80 ${REGISTRY}/sandbox-landing:${TAG} || true
+      - "@remote podman run -d --name ${WEB_IMAGE} --replace -p ${PORT_WEB:-8000}:8000 docker.io/library/${WEB_IMAGE}:${TAG}"
+      - "@remote podman run -d --name ${LANDING_IMAGE} --replace -p ${PORT_LANDING:-3000}:80 docker.io/library/${LANDING_IMAGE}:${TAG}"
 
   dev:
     desc: Start local dev with hot-reload
@@ -198,22 +214,30 @@ tasks:
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} down"
-      - "@remote podman stop sandbox-web sandbox-landing 2>/dev/null || true"
-      - "@remote podman rm sandbox-web sandbox-landing 2>/dev/null || true"
+      - "@remote podman stop ${WEB_IMAGE} ${LANDING_IMAGE} 2>/dev/null || true"
+      - "@remote podman rm ${WEB_IMAGE} ${LANDING_IMAGE} 2>/dev/null || true"
 
   logs:
     desc: View logs
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} logs -f"
-      - "@remote podman logs -f sandbox-web & podman logs -f sandbox-landing"
+      - "@remote podman logs -f ${WEB_IMAGE}"
 
   status:
     desc: Show service status
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} ps"
-      - "@remote podman ps --filter name=sandbox-web --filter name=sandbox-landing"
+      - "@remote podman ps --filter name=${WEB_IMAGE} --filter name=${LANDING_IMAGE}"
+
+  doctor:
+    desc: Diagnose deployment readiness (SSH, tools, config)
+    script: scripts/doctor.sh
+
+  setup-prod:
+    desc: Interactive production server configuration
+    script: scripts/setup-prod.sh
 ```
 
 ### scripts/ — skrypty bash
@@ -540,6 +564,145 @@ echo ""
 echo "🔧 Sprawdź: taskfile doctor"
 ```
 
+```markpact:file path=scripts/setup-prod.sh
+#!/usr/bin/env bash
+set -uo pipefail
+
+# ─── Interactive Production Setup ──────────────────────────────────────
+# Configures .env with production server details and tests connectivity.
+# Run: taskfile run setup-prod
+# ────────────────────────────────────────────────────────────────────────
+
+echo ""
+echo "🔧 Production Server Setup"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Load current .env values if exists
+if [ -f .env ]; then
+  while IFS='=' read -r key value; do
+    [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+    export "$key=$value" 2>/dev/null || true
+  done < .env
+fi
+
+# ─── Collect settings ───
+
+printf "  Server hostname [${PROD_HOST:-}]: "
+read -r INPUT
+[ -n "$INPUT" ] && PROD_HOST="$INPUT"
+if [ -z "${PROD_HOST:-}" ]; then
+  echo "  ❌ Server hostname is required!"
+  exit 1
+fi
+
+printf "  SSH user [${DEPLOY_USER:-root}]: "
+read -r INPUT
+[ -n "$INPUT" ] && DEPLOY_USER="$INPUT"
+DEPLOY_USER="${DEPLOY_USER:-root}"
+
+printf "  Web app port [${PORT_WEB:-8000}]: "
+read -r INPUT
+[ -n "$INPUT" ] && PORT_WEB="$INPUT"
+PORT_WEB="${PORT_WEB:-8000}"
+
+printf "  Landing page port [${PORT_LANDING:-3000}]: "
+read -r INPUT
+[ -n "$INPUT" ] && PORT_LANDING="$INPUT"
+PORT_LANDING="${PORT_LANDING:-3000}"
+
+# ─── Test SSH ───
+echo ""
+TARGET="${DEPLOY_USER}@${PROD_HOST}"
+echo "  🔍 Testing SSH to ${TARGET}..."
+
+if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+     "${TARGET}" 'echo "ok"' >/dev/null 2>&1; then
+  echo "  ✅ SSH key auth works!"
+else
+  echo "  ⚠️  SSH key auth failed. Trying to set up..."
+  echo ""
+
+  # Check if we have an SSH key
+  if [ ! -f ~/.ssh/id_ed25519 ] && [ ! -f ~/.ssh/id_rsa ]; then
+    echo "  No SSH key found. Generating one..."
+    ssh-keygen -t ed25519 -C "deploy@$(hostname)" -f ~/.ssh/id_ed25519 -N "" || true
+  fi
+
+  echo "  Copying SSH key to ${TARGET}..."
+  echo "  (you may need to enter the server password once)"
+  echo ""
+  if ssh-copy-id "${TARGET}" 2>/dev/null; then
+    echo ""
+    echo "  ✅ SSH key copied! Testing again..."
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'echo "ok"' >/dev/null 2>&1; then
+      echo "  ✅ SSH key auth now works!"
+    else
+      echo "  ❌ Still can't connect. Check server config manually."
+    fi
+  else
+    echo ""
+    echo "  ❌ Could not copy SSH key."
+    echo "     Try manually: ssh-copy-id ${TARGET}"
+  fi
+fi
+
+# ─── Check podman on remote ───
+if ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'which podman' >/dev/null 2>&1; then
+  echo "  ✅ Podman found on remote server"
+else
+  echo ""
+  printf "  ⚠️  Podman not found on remote. Install it? (y/n) [y]: "
+  read -r INSTALL
+  INSTALL="${INSTALL:-y}"
+  if [ "$INSTALL" = "y" ]; then
+    echo "  Installing podman on ${PROD_HOST}..."
+    ssh "${TARGET}" 'apt-get update -qq && apt-get install -y -qq podman' 2>&1 | tail -3
+    if ssh -o BatchMode=yes "${TARGET}" 'which podman' >/dev/null 2>&1; then
+      echo "  ✅ Podman installed successfully"
+    else
+      echo "  ❌ Podman installation failed. Install manually:"
+      echo "     ssh ${TARGET} 'apt install -y podman'"
+    fi
+  fi
+fi
+
+# ─── Save to .env ───
+echo ""
+echo "  💾 Saving configuration..."
+
+# Update or append each variable in .env
+update_env() {
+  local KEY="$1" VAL="$2" FILE=".env"
+  if [ ! -f "$FILE" ]; then
+    echo "${KEY}=${VAL}" > "$FILE"
+  elif grep -q "^${KEY}=" "$FILE"; then
+    sed -i "s|^${KEY}=.*|${KEY}=${VAL}|" "$FILE"
+  else
+    echo "${KEY}=${VAL}" >> "$FILE"
+  fi
+}
+
+update_env PROD_HOST "$PROD_HOST"
+update_env DEPLOY_USER "$DEPLOY_USER"
+update_env PORT_WEB "$PORT_WEB"
+update_env PORT_LANDING "$PORT_LANDING"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Configuration saved to .env"
+echo ""
+echo "  PROD_HOST=${PROD_HOST}"
+echo "  DEPLOY_USER=${DEPLOY_USER}"
+echo "  PORT_WEB=${PORT_WEB}"
+echo "  PORT_LANDING=${PORT_LANDING}"
+echo ""
+echo "  Next steps:"
+echo "    taskfile run doctor              # verify everything"
+echo "    taskfile run build               # build images"
+echo "    taskfile --env prod run deploy   # deploy to production"
+```
+
 ```markpact:file path=scripts/generate.sh
 #!/usr/bin/env bash
 set -euo pipefail
@@ -728,6 +891,18 @@ case "$CHOICE" in
     echo "Anulowano."
     ;;
 esac
+```
+
+### VERSION — wersja projektu
+
+```markpact:file path=VERSION
+1.0.0
+```
+
+### taskfile-prod.sh — skrót do statusu produkcji
+
+```markpact:file path=taskfile-prod.sh
+export $(grep -v "^#" .env | xargs 2>/dev/null) && taskfile --env prod run status
 ```
 
 ### .env — zmienne środowiskowe
