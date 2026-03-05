@@ -1,0 +1,39 @@
+version: "1"
+name: multi-env
+
+variables:
+  VERSION: ${VERSION:-1.0.0}
+  IMAGE: myapp
+
+environments:
+  dev:
+    env_file: .env.dev
+    
+  staging:
+    env_file: .env.staging
+    
+  prod:
+    env_file: .env.prod
+
+tasks:
+  build:
+    desc: "Zbuduj aplikację"
+    cmds:
+      - echo "Building version ${VERSION}"
+      - echo "Environment: ${ENV:-dev}"
+
+  deploy:
+    desc: "Deploy aplikacji"
+    cmds:
+      - echo "Deploying ${IMAGE}:${VERSION} to ${ENV:-dev}"
+      - @fn notify "Deploy complete"
+
+  rollback:
+    desc: "Rollback do poprzedniej wersji"
+    cmds:
+      - echo "Rolling back..."
+
+  health:
+    desc: "Sprawdź health endpoint"
+    cmds:
+      - @fn health-check http://localhost:8080/health

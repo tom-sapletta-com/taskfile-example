@@ -11,15 +11,15 @@ pip install markpact taskfile --upgrade
 # 2. Wypakowanie projektu
 markpact README.md
 cd sandbox
-taskfile run init
+taskfile init
 
 # 3. Konfiguracja (interaktywnie)
-taskfile setup env      # Konfiguruje .env, API keys
-taskfile setup hosts    # Konfiguruje hosty deploymentu
+taskfile setup env       # Konfiguruje .env, API keys
+taskfile setup hosts     # Konfiguruje hosty deploymentu
 
 # 4. Generowanie i uruchomienie
-taskfile run generate   # Generuje kod przez Aider
-taskfile run dev        # Start lokalny
+taskfile generate   # Generuje kod przez Aider
+taskfile dev        # Start lokalny
 ```
 
 ## 📋 Co to jest?
@@ -67,23 +67,23 @@ README.md (ten plik)
 # FAZA 1: Inicjalizacja
 markpact README.md              # Wypakuj pliki
 cd sandbox                      # Wejdź do folderu
-taskfile run init               # Zainstaluj zależności
+taskfile init                   # Zainstaluj zależności
 
 # FAZA 2: Konfiguracja
-taskfile run setup-env          # Skonfiguruj .env
-taskfile run setup-hosts        # Dodaj hosty staging/prod
+taskfile setup env              # Skonfiguruj .env
+taskfile setup hosts            # Dodaj hosty staging/prod
 
 # FAZA 3: Generowanie kodu
-taskfile run generate           # Generuj wszystko (web, desktop, landing)
+taskfile generate               # Generuj wszystko (web, desktop, landing)
 
 # FAZA 4: Rozwój
-taskfile run dev                # Start lokalny
-taskfile run dev-web            # Web z hot-reload
-taskfile run test               # Testy
+taskfile dev                    # Start lokalny
+taskfile dev-web                # Web z hot-reload
+taskfile test                   # Testy
 
 # FAZA 5: Deployment
-taskfile run build              # Build Docker images
-taskfile run deploy             # Interaktywny deployment
+taskfile build                  # Build Docker images
+taskfile deploy                 # Interaktywny deployment
 ```
 
 ## 🔧 Taski dostępne po wypakowaniu
@@ -91,15 +91,19 @@ taskfile run deploy             # Interaktywny deployment
 | Task | Opis |
 |------|------|
 | `init` | Tworzy strukturę katalogów, instaluje zależności |
-| `setup-env` | 🔐 Interaktywna konfiguracja .env (LLM provider, API keys, porty) |
-| `setup-hosts` | 🌐 Konfiguracja hostów staging/prod |
-| `doctor` | 🔧 Diagnostyka i autonaprawa projektu |
+| `setup env` | 🔐 Interaktywna konfiguracja .env (LLM provider, API keys, porty) |
+| `setup hosts` | 🌐 Konfiguracja hostów staging/prod |
 | `generate` | Generuje kod przez Aider (web, desktop, landing) |
 | `test` | Uruchamia pytest |
 | `build` | Buduje obrazy Docker |
 | `dev` | Startuje docker-compose lokalnie |
 | `deploy` | Interaktywny deployment do staging/prod |
 | `clean` | Czyści projekt (zostaje tylko README.md) |
+
+**Wbudowane komendy CLI:**
+- `taskfile doctor` - Diagnostyka projektu
+- `taskfile list` - Lista tasków
+- `taskfile init` - Interaktywne tworzenie Taskfile
 
 ---
 
@@ -159,10 +163,6 @@ functions:
       print(f"[notify] {os.environ.get('FN_ARGS', 'Done')}")
 
 tasks:
-  doctor:
-    desc: "Diagnostyka i autonaprawa projektu"
-    script: scripts/doctor.sh
-
   setup-env:
     desc: "🔐 Interaktywna konfiguracja .env - LLM provider, API keys, porty"
     script: scripts/setup-env.sh
@@ -170,6 +170,19 @@ tasks:
   setup-hosts:
     desc: "Konfiguracja hostów deploymentu"
     script: scripts/setup-hosts.sh
+
+  setup:
+    desc: "Konfiguracja projektu (env | hosts)"
+    cmds:
+      - |
+        if [ "${1:-}" = "env" ]; then
+          bash scripts/setup-env.sh
+        elif [ "${1:-}" = "hosts" ]; then
+          bash scripts/setup-hosts.sh
+        else
+          echo "Użycie: taskfile setup <env|hosts>"
+          exit 1
+        fi
 
   init:
     desc: "Inicjalizacja - tworzy strukturę, instaluje aider"
@@ -274,13 +287,13 @@ fi
 
 # Sprawdź czy prompts/ istnieją
 if [ ! -d prompts ]; then
-  echo "⚠️  Brak prompts/ - uruchom: taskfile run init"
+  echo "⚠️  Brak prompts/ - uruchom: taskfile init"
   ((ERRORS++))
 fi
 
 # Sprawdź czy .venv istnieje
 if [ ! -d .venv ]; then
-  echo "⚠️  Brak .venv - uruchom: taskfile run init"
+  echo "⚠️  Brak .venv - uruchom: taskfile init"
   ((ERRORS++))
 fi
 
@@ -289,7 +302,7 @@ if [ -z "${OPENROUTER_API_KEY:-}" ]; then
   echo "⚠️  Brak OPENROUTER_API_KEY w .env"
   echo ""
   echo "   🔧 Rozwiązanie: Uruchom interaktywną konfigurację:"
-  echo "      taskfile run setup-env"
+  echo "      taskfile setup env"
   echo ""
   echo "   Lub ręcznie dodaj klucz:"
   echo "      echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env"
@@ -503,7 +516,7 @@ echo "   Provider: $PROVIDER"
 echo "   Model: $MODEL"
 echo "   Porty: $PORT_WEB (web), $PORT_LANDING (landing)"
 echo ""
-echo "🔧 Teraz uruchom: taskfile run setup-hosts"
+echo "🔧 Teraz uruchom: taskfile setup hosts"
 ```
 
 ```markpact:file path=scripts/setup-hosts.sh
@@ -513,7 +526,7 @@ set -euo pipefail
 # Autonaprawa: sprawdź czy .env istnieje
 if [ ! -f .env ]; then
   echo "⚠️  Brak .env - tworzę..."
-  taskfile run doctor
+  taskfile doctor
 fi
 
 echo ""
@@ -564,7 +577,7 @@ echo "   STAGING_HOST=$(grep "^STAGING_HOST=" .env | cut -d= -f2)"
 echo "   PROD_HOST=$(grep "^PROD_HOST=" .env | cut -d= -f2)"
 echo "   DEPLOY_USER=$(grep "^DEPLOY_USER=" .env | cut -d= -f2)"
 echo ""
-echo "🔧 Sprawdź: taskfile run doctor"
+echo "🔧 Sprawdź: taskfile doctor"
 ```
 
 ```markpact:file path=scripts/generate.sh
@@ -582,7 +595,7 @@ find_aider() {
   elif command -v aider >/dev/null 2>&1; then
     echo "aider"
   else
-    echo "❌ Aider nie zainstalowany. Uruchom: taskfile run init" >&2
+    echo "❌ Aider nie zainstalowany. Uruchom: taskfile init" >&2
     echo "   Lub zainstaluj globalnie: pipx install aider-chat" >&2
     exit 1
   fi
@@ -620,7 +633,7 @@ case "$COMPONENT" in
     # Auto-init if apps/ don't exist
     if [ ! -d apps/web ] || [ ! -d apps/desktop ] || [ ! -d apps/landing ]; then
       echo "⚠️  Brak struktury apps/ - uruchamiam init..."
-      taskfile run init
+      taskfile init
     fi
     run_aider "web" "web.md"
     cd ../..
@@ -691,7 +704,7 @@ fi
   "1. index.html - Single page with TailwindCSS" \
   "2. Dockerfile - nginx:alpine" > prompts/landing.md
 
-echo "✅ Gotowe! Następne: taskfile run setup-hosts"
+echo "✅ Gotowe! Następne: taskfile setup hosts"
 ```
 
 ```markpact:file path=scripts/deploy.sh
@@ -851,14 +864,14 @@ services:
 
 ```bash
 # Krótka składnia (nowe komendy CLI)
-taskfile setup env              # Zamiast: taskfile run setup-env
-taskfile setup hosts            # Zamiast: taskfile run setup-hosts
+taskfile setup env              # Konfiguracja .env
+taskfile setup hosts            # Konfiguracja hostów
 
 # Podstawowe operacje
-taskfile init -i                # Interaktywne tworzenie Taskfile
+taskfile init                   # Interaktywne tworzenie Taskfile
 taskfile list                   # Lista tasków
-taskfile run <task>             # Uruchom task
-taskfile doctor                 # Diagnostyka
+taskfile doctor                 # Diagnostyka projektu
+taskfile <task>                 # Uruchom task bezpośrednio
 
 # Nowe funkcje
 taskfile watch build            # Watch mode

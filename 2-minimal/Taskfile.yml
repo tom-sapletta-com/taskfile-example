@@ -1,0 +1,24 @@
+version: "1"
+name: minimal-web
+
+variables:
+  PORT: ${PORT:-3000}
+
+tasks:
+  serve:
+    desc: "Uruchom lokalny serwer na danym porcie"
+    cmds:
+      - echo "Server running on http://localhost:${PORT}"
+      - python3 -m http.server ${PORT}
+
+  build:
+    desc: "Zbuduj projekt"
+    cmds:
+      - echo "Building..."
+      - echo "✓ Build complete"
+
+  test:
+    desc: "Uruchom testy"
+    cmds:
+      - echo "Running tests..."
+      - echo "✓ All tests passed"
