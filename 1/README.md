@@ -11,6 +11,7 @@ pip install markpact taskfile --upgrade
 # 2. Wypakowanie projektu
 markpact README.md
 cd sandbox
+taskfile run init
 
 # 3. Konfiguracja (interaktywnie)
 taskfile setup env      # Konfiguruje .env, API keys
@@ -334,9 +335,12 @@ echo ""
 echo "  5) Groq (szybkie, tanie) - https://console.groq.com"
 echo "     💡 Bardzo szybkie odpowiedzi"
 echo ""
+echo ""
+echo "⏳ Czekam na wybór..."
 printf "Wybór (1-5) [1]: "
 read PROVIDER_CHOICE
 PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
+echo "✅ Wybrano opcję: $PROVIDER_CHOICE"
 
 case "$PROVIDER_CHOICE" in
   1)
@@ -381,11 +385,15 @@ API_KEY=""
 
 if [ -n "$CURRENT_KEY" ]; then
   echo "🔑 Obecny klucz API: ${CURRENT_KEY:0:10}..."
+  echo ""
+  echo "⏳ Czekam na decyzję..."
   printf "Zmienić? (t/n) [n]: "
   read CHANGE_KEY
   if [ "$CHANGE_KEY" != "t" ]; then
-    echo "   Pozostawiam obecny klucz"
+    echo "   ✅ Pozostawiam obecny klucz"
     API_KEY="$CURRENT_KEY"
+  else
+    echo "   🔄 Będę prosić o nowy klucz API"
   fi
 fi
 
@@ -398,8 +406,10 @@ if [ -z "$API_KEY" ] && [ "$PROVIDER" != "ollama" ]; then
   echo "   3. Utwórz nowy klucz API"
   echo "   4. Skopiuj klucz i wklej poniżej"
   echo ""
+  echo "⏳ Czekam na wklejenie klucza..."
   printf "🔑 Wklej klucz API: "
   read API_KEY
+  echo "✅ Otrzymano klucz API"
 
   # Zapisz klucz z odpowiednią nazwą zmiennej
   case "$PROVIDER" in
@@ -426,13 +436,17 @@ fi
 
 # === MODEL ===
 echo ""
+echo "🎯 Konfiguracja modelu AI"
 CURRENT_MODEL=$(grep "^AIDER_MODEL=" .env 2>/dev/null | cut -d= -f2 || echo "")
 if [ -n "$CURRENT_MODEL" ]; then
   echo "🎯 Obecny model: $CURRENT_MODEL"
 fi
+echo ""
+echo "⏳ Czekam na wybór modelu..."
 printf "🎯 Model [$DEFAULT_MODEL]: "
 read MODEL
 MODEL=${MODEL:-$DEFAULT_MODEL}
+echo "✅ Wybrano model: $MODEL"
 sed -i "/^AIDER_MODEL=/d" .env 2>/dev/null
 echo "AIDER_MODEL=$MODEL" >> .env
 
@@ -443,28 +457,39 @@ echo ""
 
 CURRENT_WEB=$(grep "^PORT_WEB=" .env 2>/dev/null | cut -d= -f2 || echo "")
 CURRENT_WEB=${CURRENT_WEB:-8000}
+echo ""
+echo "⏳ Czekam na port Web App..."
 printf "   Port Web App [$CURRENT_WEB]: "
 read PORT_WEB
 PORT_WEB=${PORT_WEB:-$CURRENT_WEB}
 sed -i "/^PORT_WEB=/d" .env 2>/dev/null
 echo "PORT_WEB=$PORT_WEB" >> .env
+echo "✅ Ustawiono port Web: $PORT_WEB"
 
 CURRENT_LANDING=$(grep "^PORT_LANDING=" .env 2>/dev/null | cut -d= -f2 || echo "")
 CURRENT_LANDING=${CURRENT_LANDING:-3000}
+echo ""
+echo "⏳ Czekam na port Landing..."
 printf "   Port Landing [$CURRENT_LANDING]: "
 read PORT_LANDING
 PORT_LANDING=${PORT_LANDING:-$CURRENT_LANDING}
 sed -i "/^PORT_LANDING=/d" .env 2>/dev/null
 echo "PORT_LANDING=$PORT_LANDING" >> .env
+echo "✅ Ustawiono port Landing: $PORT_LANDING"
 
 # === PROJECT NAME ===
+echo ""
+echo "📁 Konfiguracja nazwy projektu"
 CURRENT_NAME=$(grep "^PROJECT_NAME=" .env 2>/dev/null | cut -d= -f2 || echo "")
 CURRENT_NAME=${CURRENT_NAME:-taskfile-example}
-printf "\n📁 Nazwa projektu [$CURRENT_NAME]: "
+echo ""
+echo "⏳ Czekam na nazwę projektu..."
+printf "📁 Nazwa projektu [$CURRENT_NAME]: "
 read PROJECT_NAME
 PROJECT_NAME=${PROJECT_NAME:-$CURRENT_NAME}
 sed -i "/^PROJECT_NAME=/d" .env 2>/dev/null
 echo "PROJECT_NAME=$PROJECT_NAME" >> .env
+echo "✅ Ustawiono nazwę projektu: $PROJECT_NAME"
 
 # === VERSION ===
 sed -i "/^VERSION=/d" .env 2>/dev/null
@@ -519,9 +544,12 @@ for var in STAGING_HOST PROD_HOST DEPLOY_USER; do
       ;;
   esac
 
+  echo ""
+  echo "⏳ Czekam na $var..."
   printf "%s%s [%s]: " "$var" "$hint" "$val"
   read input
   new_val=${input:-$val}
+  echo "✅ Ustawiono $var: $new_val"
 
   if grep -q "^${var}=" .env 2>/dev/null; then
     sed -i "s/^${var}=.*/${var}=${new_val}/" .env
@@ -671,14 +699,19 @@ echo "✅ Gotowe! Następne: taskfile run setup-hosts"
 set -euo pipefail
 
 echo "🚀 Deployment: 1) staging  2) prod"
+echo ""
+echo "⏳ Czekam na wybór środowiska..."
 printf "Wybierz: "; read CHOICE
 [ "$CHOICE" = "1" ] && ENV="staging" && VAR="STAGING_HOST"
 [ "$CHOICE" = "2" ] && ENV="prod" && VAR="PROD_HOST"
 [ -z "${ENV:-}" ] && echo "❌ Nieprawidłowy wybór" && exit 1
 HOST=$(grep "^${VAR}=" .env | cut -d= -f2)
 [ -z "$HOST" ] && echo "❌ Host nie skonfigurowany" && exit 1
+echo ""
+echo "⏳ Czekam na potwierdzenie deploymentu do $ENV..."
 printf "Deploy do %s? (t/n): " "$ENV"; read CONFIRM
-[ "$CONFIRM" != "t" ] && echo "Anulowano" && exit 0
+[ "$CONFIRM" != "t" ] && echo "❌ Anulowano" && exit 0
+echo "✅ Rozpoczynam deployment do $ENV..."
 taskfile --env "$ENV" run deploy-exec
 ```
 
@@ -694,8 +727,10 @@ echo "  2) Aplikacje + środowisko (.venv/)"
 echo "  3) Wszystko poza README.md (pełne reset)"
 echo "  4) Anuluj"
 echo ""
+echo "⏳ Czekam na wybór opcji czyszczenia..."
 printf "Wybór (1-4): "
 read CHOICE
+echo "✅ Wybrano opcję: $CHOICE"
 
 case "$CHOICE" in
   1)
