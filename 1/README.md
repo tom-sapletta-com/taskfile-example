@@ -2,26 +2,6 @@
 
 **Cały projekt w jednym pliku README.md — wypakuj i uruchom przez Taskfile.**
 
-## 🚀 Szybki start
-
-```bash
-# 1. Instalacja
-pip install markpact taskfile --upgrade
-
-# 2. Wypakowanie projektu
-markpact README.md
-cd sandbox
-taskfile init
-
-# 3. Konfiguracja (interaktywnie)
-taskfile run setup-env       # Konfiguruje .env, API keys
-taskfile run setup-hosts     # Konfiguruje hosty deploymentu
-
-# 4. Generowanie i uruchomienie
-taskfile run generate   # Generuje kod przez Aider
-taskfile run dev        # Start lokalny
-```
-
 ## 📋 Co to jest?
 
 Ten projekt demonstruje podejście **Single-File Project** z wydzieloną logiką do skryptów:
@@ -64,27 +44,76 @@ README.md (ten plik)
 
 ## 🎯 Workflow
 
+### Instalacja i przygotowanie
+
 ```bash
-# FAZA 1: Inicjalizacja
-markpact README.md              # Wypakuj pliki
-cd sandbox                      # Wejdź do folderu
-taskfile init                   # Zainstaluj zależności
+# 1. Instalacja narzędzi
+pip install markpact taskfile --upgrade
 
-# FAZA 2: Konfiguracja
-taskfile run setup-env              # Skonfiguruj .env
-taskfile run setup-hosts            # Dodaj hosty staging/prod
+# 2. Wypakowanie projektu
+markpact README.md
+cd sandbox
 
-# FAZA 3: Generowanie kodu
-taskfile run generate               # Generuj wszystko (web, desktop, landing)
+# 3. Inicjalizacja projektu
+taskfile init
 
-# FAZA 4: Rozwój
-taskfile run dev                    # Start lokalny
-taskfile run dev-web                # Web z hot-reload
-taskfile run test                   # Testy
+# 4. Konfiguracja (interaktywnie)
+taskfile run setup-env       # Konfiguruje .env, API keys
+taskfile run setup-hosts     # Konfiguruje hosty deploymentu
+```
 
-# FAZA 5: Deployment
-taskfile run build                  # Build Docker images
-taskfile run deploy                 # Interaktywny deployment
+### Generowanie kodu i rozwój lokalny
+
+```bash
+# Generowanie kodu przez Aider (web, desktop, landing)
+taskfile run generate
+
+# Start lokalny z Docker
+taskfile run dev
+
+# Lub bez Docker (tylko web)
+taskfile run dev-web
+
+# Testy
+taskfile run test
+```
+
+### Build i deploy
+
+```bash
+# Build obrazów Docker
+taskfile run build
+
+# Deploy lokalny (docker compose up -d)
+taskfile run deploy
+
+# Deploy na prod (SSH → podman pull + podman run)
+taskfile --env prod run deploy
+
+# Dry-run (podgląd komend bez uruchamiania)
+taskfile --env prod --dry-run run deploy
+```
+
+### Monitorowanie i zarządzanie
+
+```bash
+# Status lokalny (docker compose ps)
+taskfile run status
+
+# Status na prod (SSH → podman ps)
+taskfile --env prod run status
+
+# Logi lokalne
+taskfile run logs
+
+# Logi na prod (SSH → podman logs)
+taskfile --env prod run logs
+
+# Stop lokalny
+taskfile run stop
+
+# Stop na prod
+taskfile --env prod run stop
 ```
 
 ## 🔧 Taski dostępne po wypakowaniu
@@ -98,9 +127,11 @@ taskfile run deploy                 # Interaktywny deployment
 | `taskfile run test` | Uruchamia pytest |
 | `taskfile run build` | Build Docker images |
 | `taskfile run dev` | Start lokalny z hot-reload |
-| `taskfile run deploy --env prod` | Deploy do staging/prod przez SSH |
-| `taskfile run logs` | Logi aplikacji (local/remote) |
-| `taskfile run status` | Status serwisów (local/remote) |
+| `taskfile run deploy` | Deploy lokalny (`docker compose up -d`) |
+| `taskfile --env prod run deploy` | Deploy na prod (SSH → `podman pull/run`) |
+| `taskfile run stop` | Stop serwisów (`@local`/`@remote`) |
+| `taskfile run logs` | Logi (`@local`/`@remote`) |
+| `taskfile run status` | Status serwisów (`@local`/`@remote`) |
 | `taskfile run clean` | Czyszczenie projektu |
 
 **Wbudowane komendy CLI:**
@@ -117,10 +148,12 @@ taskfile run deploy                 # Interaktywny deployment
 ```markpact:file path=Taskfile.yml
 version: "1"
 name: my-app
-description: Minimal Taskfile
+description: Example Taskfile — local Docker Compose + remote Podman deploy
 
 variables:
   APP_NAME: my-app
+  TAG: latest
+  REGISTRY: ghcr.io/your-org
 
 environments:
   local:
@@ -128,13 +161,13 @@ environments:
     compose_command: docker compose
 
   prod:
-    ssh_host: your-server.example.com
-    ssh_user: deploy
+    ssh_host: ${SSH_HOST:-your-server.example.com}
+    ssh_user: ${SSH_USER:-deploy}
     container_runtime: podman
 
 tasks:
   build:
-    desc: Build the application
+    desc: Build images
     cmds:
       - ${COMPOSE} build
 
@@ -144,26 +177,34 @@ tasks:
     deps: [build]
     cmds:
       - "@local ${COMPOSE} up -d"
-      - "@remote podman pull ${APP_NAME}:latest"
-      - "@remote podman run -d --name ${APP_NAME} --replace -p 8000:8000 ${APP_NAME}:latest"
+      - "@remote podman pull ${REGISTRY}/${APP_NAME}:${TAG}"
+      - "@remote podman run -d --name ${APP_NAME} --replace -p 8000:8000 ${REGISTRY}/${APP_NAME}:${TAG}"
 
   dev:
-    desc: Start local development with hot-reload
+    desc: Start local dev with hot-reload
     env: [local]
     cmds:
       - ${COMPOSE} up -d --build
-      - echo "✅ Dev server running at http://localhost:${PORT_WEB:-8000}"
+      - echo "✅ Dev running at http://localhost:${PORT_WEB:-8000}"
       - ${COMPOSE} logs -f
 
+  stop:
+    desc: Stop services
+    env: [local, prod]
+    cmds:
+      - "@local ${COMPOSE} down"
+      - "@remote podman stop ${APP_NAME} 2>/dev/null || true"
+      - "@remote podman rm ${APP_NAME} 2>/dev/null || true"
+
   logs:
-    desc: View application logs
+    desc: View logs
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} logs -f"
       - "@remote podman logs ${APP_NAME} -f"
 
   status:
-    desc: Show running services
+    desc: Show service status
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} ps"
