@@ -183,6 +183,8 @@ environments:
     container_runtime: podman
 
 tasks:
+  # ─── Core tasks ───────────────────────────────────────
+
   build:
     desc: Build Docker images locally
     cmds:
@@ -205,7 +207,9 @@ tasks:
     cmds:
       - "@local ${COMPOSE} up -d"
       - "@remote podman run -d --name ${WEB_IMAGE} --replace -p ${PORT_WEB:-8000}:8000 docker.io/library/${WEB_IMAGE}:${TAG}"
-      - "@remote podman run -d --name ${LANDING_IMAGE} --replace -p ${PORT_LANDING:-3000}:80 docker.io/library/${LANDING_IMAGE}:${TAG}"
+      - "@remote podman run -d --name ${LANDING_IMAGE} --replace -p ${PORT_LANDING:-3000}:3000 docker.io/library/${LANDING_IMAGE}:${TAG}"
+
+  # ─── Development ──────────────────────────────────────
 
   dev:
     desc: Start local dev with hot-reload
@@ -214,6 +218,8 @@ tasks:
       - ${COMPOSE} up -d --build
       - echo "✅ Dev running at http://localhost:${PORT_WEB:-8000}"
       - ${COMPOSE} logs -f
+
+  # ─── Operations ───────────────────────────────────────
 
   stop:
     desc: Stop services
@@ -237,6 +243,8 @@ tasks:
       - "@local ${COMPOSE} ps"
       - "@remote podman ps --filter name=${WEB_IMAGE} --filter name=${LANDING_IMAGE}"
 
+  # ─── Diagnostics & Setup ──────────────────────────────
+
   doctor:
     desc: Diagnose deployment readiness (SSH, tools, config)
     script: scripts/doctor.sh
@@ -244,65 +252,179 @@ tasks:
   setup-prod:
     desc: Interactive production server configuration
     script: scripts/setup-prod.sh
+
+  # ─── Sync ──────────────────────────────────────────────
+
+  sync-readme:
+    desc: Sync sandbox files → README.md markpact blocks
+    cmds:
+      - python3 ../scripts/sync-readme.py
+
+  sync-check:
+    desc: Check if sandbox files are in sync with README.md
+    cmds:
+      - python3 ../scripts/sync-readme.py --check
 ```
 
 ### scripts/ — skrypty bash
 
 ```markpact:file path=scripts/doctor.sh
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
-# Load environment variables from .env
-[ -f .env ] && export $(grep -v '^#' .env | xargs) 2>/dev/null || true
-echo "🔧 Taskfile Doctor - sprawdzam projekt..."
+# ─── Deployment Doctor ─────────────────────────────────────────────────
+# Diagnoses all prerequisites for local and remote deployment.
+# Run: taskfile run doctor
+# ────────────────────────────────────────────────────────────────────────
+
 ERRORS=0
+WARNINGS=0
 
-# Sprawdź czy .env istnieje
+ok()   { echo "  ✅ $*"; }
+warn() { echo "  ⚠️  $*"; WARNINGS=$((WARNINGS+1)); }
+fail() { echo "  ❌ $*"; ERRORS=$((ERRORS+1)); }
+info() { echo "  ℹ️  $*"; }
+hint() { echo "     → $*"; }
+
+echo ""
+echo "🔧 Deployment Doctor"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# ─── 1. .env file ───
+echo ""
+echo "📋 Configuration (.env)"
 if [ ! -f .env ]; then
-  echo "⚠️  Brak .env - tworzę z szablonu..."
-  printf '%s\n' \
-    "PROJECT_NAME=taskfile-example" \
-    "VERSION=1.0.0" \
-    "OPENROUTER_API_KEY=" \
-    "AIDER_MODEL=openrouter/anthropic/claude-sonnet-4" \
-    "PORT_WEB=8000" \
-    "PORT_LANDING=3000" \
-    "STAGING_HOST=" \
-    "PROD_HOST=" \
-    "DEPLOY_USER=deploy" > .env
-  echo "✅ Utworzono .env"
-  ((ERRORS++))
-fi
-
-# Sprawdź czy prompts/ istnieją
-if [ ! -d prompts ]; then
-  echo "⚠️  Brak prompts/ - uruchom: taskfile run init"
-  ((ERRORS++))
-fi
-
-# Sprawdź czy .venv istnieje
-if [ ! -d .venv ]; then
-  echo "⚠️  Brak .venv - uruchom: taskfile run init"
-  ((ERRORS++))
-fi
-
-# Sprawdź OPENROUTER_API_KEY
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  echo "⚠️  Brak OPENROUTER_API_KEY w .env"
-  echo ""
-  echo "   🔧 Rozwiązanie: Uruchom interaktywną konfigurację:"
-  echo "      taskfile run setup-env"
-  echo ""
-  echo "   Lub ręcznie dodaj klucz:"
-  echo "      echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env"
-  echo ""
-  ((ERRORS++))
-fi
-
-if [ $ERRORS -eq 0 ]; then
-  echo "✅ Wszystko OK! Projekt gotowy."
+  fail ".env file missing"
+  hint "Run: taskfile run setup-prod"
+  hint "Or create manually with PROD_HOST, DEPLOY_USER, PORT_WEB, PORT_LANDING"
 else
-  echo "🔧 Naprawiono $ERRORS problemów. Sprawdź powyżej."
+  ok ".env file found"
+
+  # Check key variables
+  for VAR in PROD_HOST DEPLOY_USER PORT_WEB PORT_LANDING; do
+    VAL=$(grep "^${VAR}=" .env 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -z "$VAL" ]; then
+      case "$VAR" in
+        PROD_HOST)
+          fail "PROD_HOST not set in .env"
+          hint "Add: PROD_HOST=your-server.example.com"
+          ;;
+        DEPLOY_USER)
+          warn "DEPLOY_USER not set (defaults to 'deploy')"
+          hint "Add: DEPLOY_USER=root"
+          ;;
+        *)
+          info "$VAR not set (will use default)"
+          ;;
+      esac
+    else
+      ok "$VAR=$VAL"
+    fi
+  done
+fi
+
+# ─── 2. Local tools ───
+echo ""
+echo "🔧 Local Tools"
+for CMD in docker "docker compose"; do
+  if $CMD version >/dev/null 2>&1; then
+    ok "$CMD available"
+  else
+    fail "$CMD not installed"
+    hint "Install Docker: https://docs.docker.com/engine/install/"
+  fi
+done
+
+if command -v ssh >/dev/null 2>&1; then
+  ok "ssh client available"
+else
+  fail "ssh not installed"
+fi
+
+# ─── 3. Docker images ───
+echo ""
+echo "🐳 Docker Images"
+for IMG in sandbox-web sandbox-landing; do
+  if docker image inspect "${IMG}:latest" >/dev/null 2>&1; then
+    ok "${IMG}:latest exists"
+  else
+    warn "${IMG}:latest not built yet"
+    hint "Run: taskfile run build"
+  fi
+done
+
+# ─── 4. SSH connectivity ───
+echo ""
+echo "🔐 SSH Connection"
+if [ -z "${PROD_HOST:-}" ]; then
+  info "Skipping SSH check (PROD_HOST not set)"
+else
+  TARGET="${DEPLOY_USER:-deploy}@${PROD_HOST}"
+
+  # Test basic connectivity
+  echo "  Testing ${TARGET}..."
+  if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+       "${TARGET}" 'echo "ok"' >/dev/null 2>&1; then
+    ok "SSH key auth works (${TARGET})"
+
+    # Check podman on remote
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'which podman' >/dev/null 2>&1; then
+      PODMAN_VER=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'podman --version 2>/dev/null' || echo "unknown")
+      ok "Podman on remote: ${PODMAN_VER}"
+    else
+      fail "Podman NOT installed on remote"
+      hint "Fix: ssh ${TARGET} 'apt install -y podman'"
+    fi
+
+    # Check disk space on remote
+    DISK_AVAIL=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" \
+      'df -h / | tail -1 | awk "{print \$4}"' 2>/dev/null || echo "?")
+    info "Remote disk available: ${DISK_AVAIL}"
+
+  else
+    fail "SSH connection failed to ${TARGET}"
+    echo ""
+    hint "Possible fixes:"
+    hint "1. Check host reachable: ping ${PROD_HOST}"
+    hint "2. Copy SSH key:         ssh-copy-id ${TARGET}"
+    hint "3. Test manually:        ssh ${TARGET}"
+    hint "4. Check firewall:       port 22 open on ${PROD_HOST}"
+    echo ""
+    hint "If you don't have an SSH key yet:"
+    hint "   ssh-keygen -t ed25519 -C 'deploy@$(hostname)'"
+    hint "   ssh-copy-id ${TARGET}"
+  fi
+fi
+
+# ─── 5. Port conflicts ───
+echo ""
+echo "🌐 Ports"
+for PORT_VAR in PORT_WEB PORT_LANDING; do
+  PORT="${!PORT_VAR:-}"
+  [ -z "$PORT" ] && continue
+  if ss -tlnp 2>/dev/null | grep -q ":${PORT} " ; then
+    warn "Port ${PORT} (${PORT_VAR}) already in use locally"
+  else
+    ok "Port ${PORT} (${PORT_VAR}) available locally"
+  fi
+done
+
+# ─── Summary ───
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
+  echo "✅ All checks passed! Ready to deploy."
+  echo ""
+  echo "   Local:  taskfile run deploy"
+  echo "   Prod:   taskfile --env prod run deploy"
+elif [ $ERRORS -eq 0 ]; then
+  echo "⚠️  ${WARNINGS} warning(s) — deploy should still work."
+else
+  echo "❌ ${ERRORS} error(s), ${WARNINGS} warning(s)"
+  echo ""
+  echo "   Fix issues above, then run: taskfile run doctor"
+  echo "   Interactive setup:          taskfile run setup-prod"
+  exit 1
 fi
 ```
 
@@ -505,7 +627,7 @@ echo "   Provider: $PROVIDER"
 echo "   Model: $MODEL"
 echo "   Porty: $PORT_WEB (web), $PORT_LANDING (landing)"
 echo ""
-echo "🔧 Teraz uruchom: taskfile run setup-hosts"
+echo "🔧 Teraz uruchom: taskfile setup hosts"
 ```
 
 ```markpact:file path=scripts/setup-hosts.sh
@@ -528,7 +650,6 @@ echo "   User:    deploy, ubuntu, ec2-user"
 echo ""
 echo "   (Wciśnij Enter aby pominąć lub zachować obecną wartość)"
 echo ""
-
 
 for var in STAGING_HOST PROD_HOST DEPLOY_USER; do
   val=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2 || echo "")
@@ -724,7 +845,7 @@ find_aider() {
   elif command -v aider >/dev/null 2>&1; then
     echo "aider"
   else
-    echo "❌ Aider nie zainstalowany. Uruchom: taskfile run init" >&2
+    echo "❌ Aider nie zainstalowany. Uruchom: taskfile init" >&2
     echo "   Lub zainstaluj globalnie: pipx install aider-chat" >&2
     exit 1
   fi
@@ -762,7 +883,7 @@ case "$COMPONENT" in
     # Auto-init if apps/ don't exist
     if [ ! -d apps/web ] || [ ! -d apps/desktop ] || [ ! -d apps/landing ]; then
       echo "⚠️  Brak struktury apps/ - uruchamiam init..."
-      taskfile run init
+      taskfile init
     fi
     run_aider "web" "web.md"
     cd ../..
@@ -833,7 +954,7 @@ fi
   "1. index.html - Single page with TailwindCSS" \
   "2. Dockerfile - nginx:alpine" > prompts/landing.md
 
-echo "✅ Gotowe! Następne: taskfile run setup-hosts"
+echo "✅ Gotowe! Następne: taskfile setup hosts"
 ```
 
 ```markpact:file path=scripts/deploy.sh
@@ -902,7 +1023,7 @@ esac
 ### VERSION — wersja projektu
 
 ```markpact:file path=VERSION
-1.0.0
+0.1.1
 ```
 
 ### taskfile-prod.sh — skrót do statusu produkcji
@@ -926,32 +1047,35 @@ DEPLOY_USER=deploy
 REGISTRY=ghcr.io/your-org
 ```
 
-### .env.example — szablon zmiennych środowiskowych
-
-```markpact:file path=.env.example
-PROJECT_NAME=taskfile-example
-VERSION=1.0.0
-OPENROUTER_API_KEY=
-AIDER_MODEL=openrouter/anthropic/claude-sonnet-4
-PORT_WEB=8000
-PORT_LANDING=3000
-STAGING_HOST=
-PROD_HOST=
-DEPLOY_USER=deploy
-```
-
 ### .gitignore — ignorowane pliki
 
 ```markpact:file path=.gitignore
+# Environment files
+!.env
+.env.local
+.env.prod
+.env.staging
+
+# Python
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
 node_modules/
 dist/
-.env
-.env.local
-.env.staging
-.env.prod
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
 ```
 
 ### prompts/ — prompty dla Aidera
@@ -1010,6 +1134,22 @@ services:
     build: ./apps/landing
     ports:
       - "${PORT_LANDING:-3000}:80"
+```
+
+### deploy/quadlet/ — Podman Quadlet units (systemd)
+
+```markpact:file path=deploy/quadlet/web.container
+[Unit]\nDescription=web container\n\n[Container]\nContainerName=web\nEnvironment=VERSION=1.0.0\nPublishPort=8001:8000\nNetwork=proxy.network\n\n[Service]\nRestart=always\nTimeoutStartSec=300\n\n[Install]\nWantedBy=multi-user.target default.target\n
+```
+
+```markpact:file path=deploy/quadlet/landing.container
+[Unit]\nDescription=landing container\n\n[Container]\nContainerName=landing\nPublishPort=3001:80\nNetwork=proxy.network\n\n[Service]\nRestart=always\nTimeoutStartSec=300\n\n[Install]\nWantedBy=multi-user.target default.target\n
+```
+
+```markpact:file path=deploy/quadlet/proxy.network
+[Network]
+NetworkName=proxy
+Driver=bridge
 ```
 
 ### Dockerfile — obraz bazowy
