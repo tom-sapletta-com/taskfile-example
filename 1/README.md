@@ -38,7 +38,9 @@ README.md (ten plik)
     ├── scripts/           → Tylko skrypty specyficzne dla projektu
     │   ├── init.sh        → Inicjalizacja (venv, zależności, prompts)
     │   └── generate.sh    → Generowanie kodu przez Aider
-    ├── .env               → Konfiguracja (hosty, klucze, porty)
+    ├── .env               → Konfiguracja lokalna (porty, klucze API)
+    ├── .env.staging       → Konfiguracja staging (domeny, hosty)
+    ├── .env.prod          → Konfiguracja produkcji (domeny, hosty)
     ├── Dockerfile         → Obraz bazowy (python:3.12-slim)
     ├── docker-compose.yml → Konfiguracja Docker
     ├── deploy/quadlet/    → Podman Quadlet units (systemd)
@@ -90,6 +92,7 @@ taskfile run dev
 # Diagnostyka
 taskfile doctor
 taskfile doctor -v         # + remote health, SSH connectivity
+taskfile --env prod doctor --remote  # Diagnostyka na serwerze produkcyjnym
 ```
 
 ### Build i deploy
@@ -98,14 +101,14 @@ taskfile doctor -v         # + remote health, SSH connectivity
 # Build obrazów Docker
 taskfile run build
 
-# Deploy lokalny (docker compose up -d)
-taskfile run deploy
+# Transfer obrazów na serwer (wymagane przed deploy!)
+taskfile push taskfile-example-web:latest taskfile-example-landing:latest
 
-# Transfer obrazów na serwer (bez registry!)
-taskfile push sandbox-web:latest sandbox-landing:latest
-
-# Deploy na prod (SSH → podman)
+# Deploy na prod (SSH → podman) — wymaga wcześniejszego push
 taskfile --env prod run deploy
+
+# Sprawdź czy obrazy są na serwerze
+taskfile --env prod doctor --remote
 
 # Dry-run (podgląd komend bez uruchamiania)
 taskfile --env prod --dry-run run deploy
@@ -160,6 +163,8 @@ taskfile clean --level 1 --yes        # Tylko apps/
 | Komenda | Opis |
 |---------|------|
 | `taskfile doctor` | 🔧 5-warstwowa diagnostyka (preflight, validation, env, fix, LLM) |
+| `taskfile doctor -v` | 🔧 + remote health, SSH connectivity |
+| `taskfile --env prod doctor --remote` | 🔧 Diagnostyka na serwerze produkcyjnym (SSH, podman, dysk) |
 | `taskfile setup env` | 🔐 Konfiguracja .env (porty, projekt) |
 | `taskfile setup hosts` | 🌐 Konfiguracja hostów staging/prod |
 | `taskfile setup prod` | 🚀 Setup produkcji (SSH, podman, dysk) |
@@ -186,6 +191,8 @@ variables:
   TAG: latest
   WEB_IMAGE: sandbox-web
   LANDING_IMAGE: sandbox-landing
+  WEB_CONTAINER: web
+  LANDING_CONTAINER: landing
   COMPOSE: docker compose
 
 environments:
@@ -197,6 +204,7 @@ environments:
     ssh_host: ${PROD_HOST:-your-server.example.com}
     ssh_user: ${DEPLOY_USER:-root}
     container_runtime: podman
+    env_file: .env.prod
 
 tasks:
   # ─── Core tasks ───────────────────────────────────────
@@ -213,8 +221,10 @@ tasks:
     cmds:
       - "@local ${COMPOSE} up -d"
       - "@remote mkdir -p /etc/containers/systemd /home/tom/sandbox/deploy /home/tom/sandbox/letsencrypt"
-      - "@remote scp deploy/quadlet/*.container deploy/quadlet/*.network deploy/traefik.yml deploy/traefik-dynamic.yml ${DEPLOY_USER}@${PROD_HOST}:/etc/containers/systemd/"
-      - "@remote ssh ${DEPLOY_USER}@${PROD_HOST} 'systemctl daemon-reload && systemctl start traefik container-web container-landing'"
+      - "@push deploy/quadlet/*.container deploy/quadlet/*.network /etc/containers/systemd/"
+      - "@push deploy/traefik.yml deploy/traefik-dynamic.yml /home/tom/sandbox/deploy/"
+      - "@remote systemctl daemon-reload"
+      - "@remote systemctl start traefik web landing"
 
   # ─── Development ──────────────────────────────────────
 
@@ -233,22 +243,22 @@ tasks:
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} down"
-      - "@remote podman stop ${WEB_IMAGE} ${LANDING_IMAGE} 2>/dev/null || true"
-      - "@remote podman rm ${WEB_IMAGE} ${LANDING_IMAGE} 2>/dev/null || true"
+      - "@remote podman stop ${WEB_CONTAINER} ${LANDING_CONTAINER} 2>/dev/null || true"
+      - "@remote podman rm ${WEB_CONTAINER} ${LANDING_CONTAINER} 2>/dev/null || true"
 
   logs:
     desc: View logs
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} logs --tail 50"
-      - "@remote echo '=== sandbox-web ===' && podman logs --tail 20 ${WEB_IMAGE} && echo '=== sandbox-landing ===' && podman logs --tail 20 ${LANDING_IMAGE}"
+      - "@remote echo '=== web ===' && podman logs --tail 20 ${WEB_CONTAINER} && echo '=== landing ===' && podman logs --tail 20 ${LANDING_CONTAINER}"
 
   status:
     desc: Show service status
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} ps"
-      - "@remote podman ps --filter name=${WEB_IMAGE} --filter name=${LANDING_IMAGE}"
+      - "@remote podman ps --filter name=${WEB_CONTAINER} --filter name=${LANDING_CONTAINER}"
 
   # ─── Code generation (project-specific) ────────────────
 
@@ -379,8 +389,7 @@ else
 fi
 
 # Domyślne prompty
-[ -f prompts/web.md ] || printf '%s
-' \
+[ -f prompts/web.md ] || printf '%s\n' \
   "# Generate: SaaS Web Application (FastAPI)" "" \
   "Create a FastAPI web application in apps/web/ with:" "" \
   "## Files to create:" \
@@ -389,8 +398,7 @@ fi
   "3. requirements.txt - fastapi, uvicorn, jinja2" \
   "4. Dockerfile - python:3.12-slim" > prompts/web.md
 
-[ -f prompts/desktop.md ] || printf '%s
-' \
+[ -f prompts/desktop.md ] || printf '%s\n' \
   "# Generate: Desktop Application (Electron)" "" \
   "Create an Electron desktop app in apps/desktop/ with:" "" \
   "## Files to create:" \
@@ -398,8 +406,7 @@ fi
   "2. main.js - Main process" \
   "3. index.html - Renderer" > prompts/desktop.md
 
-[ -f prompts/landing.md ] || printf '%s
-' \
+[ -f prompts/landing.md ] || printf '%s\n' \
   "# Generate: Landing Page" "" \
   "Create a static landing page in apps/landing/ with:" "" \
   "## Files to create:" \
@@ -415,24 +422,93 @@ echo "✅ Gotowe! Następne: taskfile setup hosts"
 0.1.1
 ```
 
-### .env — zmienne środowiskowe
+### Pliki konfiguracyjne .env
+
+Projekt używa **trzech plików .env** dla różnych środowisk:
+
+| Plik | Środowisko | Zawartość |
+|------|-----------|-----------|
+| `.env` | Lokalne | Porty, klucze API, ustawienia dev |
+| `.env.staging` | Staging | Domeny, hosty, certyfikaty staging |
+| `.env.prod` | Produkcja | Domeny produkcyjne, hosty, certyfikaty |
+
+#### `.env` — konfiguracja lokalna
 
 ```markpact:file path=.env
+# Auto-generated by taskfile init
+
+DOMAIN=localhost
+OPENROUTER_API_KEY=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
+PROD_USER=root
+STAGING_USER=root
+
 PROJECT_NAME=taskfile-example
 VERSION=1.0.0
-OPENROUTER_API_KEY=
-AIDER_MODEL=openrouter/anthropic/claude-sonnet-4
-PORT_WEB=8000
-PORT_LANDING=3000
-STAGING_HOST=
-PROD_HOST=
-DEPLOY_USER=deploy
+
+# LLM Configuration
+LLM_MODEL=openrouter/openrouter/moonshotai/kimi-k2.5
+LLM_AGENT=aider
+
+# Build
+TAG=latest
+
+# Ports
+PORT_WEB=8001
+PORT_LANDING=3001
+
+# Hosts
+STAGING_HOST=c2005.mask.services
+PROD_HOST=c2006.mask.services
+DEPLOY_USER=root
 REGISTRY=ghcr.io/your-org
 
+# Domains
+DOMAIN_WEB=c2006.mask.services
+DOMAIN_LANDING=c2007.mask.services
+DOMAIN_API=api.c2006.mask.services
+
 # Traefik TLS domains
-WEB_DOMAIN=web.example.com
-LANDING_DOMAIN=landing.example.com
-ACME_EMAIL=admin@example.com
+WEB_DOMAIN=c2006.mask.services
+LANDING_DOMAIN=c2007.mask.services
+ACME_EMAIL=admin@softreck.com
+```
+
+#### `.env.staging` — konfiguracja staging
+
+Tworzony ręcznie lub przez `taskfile setup hosts`:
+
+```bash
+# Staging environment
+OPENROUTER_API_KEY=...
+LLM_MODEL=openrouter/anthropic/claude-sonnet-4
+LLM_AGENT=opencode
+TAG=latest
+
+STAGING_HOST=staging.example.com
+DEPLOY_USER=deploy
+
+DOMAIN_WEB=app-staging.example.com
+DOMAIN_LANDING=staging.example.com
+DOMAIN_API=api-staging.example.com
+```
+
+#### `.env.prod` — konfiguracja produkcji
+
+Tworzony ręcznie lub przez `taskfile setup hosts`:
+
+```bash
+# Production environment
+OPENROUTER_API_KEY=...
+LLM_MODEL=openrouter/anthropic/claude-sonnet-4
+LLM_AGENT=opencode
+TAG=latest
+
+PROD_HOST=prod.example.com
+DEPLOY_USER=deploy
+
+DOMAIN_WEB=app.example.com
+DOMAIN_LANDING=example.com
+DOMAIN_API=api.example.com
 ```
 
 ### .gitignore — ignorowane pliki
