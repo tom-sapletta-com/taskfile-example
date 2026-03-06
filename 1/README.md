@@ -13,6 +13,12 @@ Ten projekt demonstruje podejście **Single-File Project** z wydzieloną logiką
 
 ## 🏗️ Architektura
 
+**Networking:** Ten przykład używa prostego mapowania portów (brak Traefik).  
+- **Lokalnie:** `docker compose` z portami 8000, 3000
+- **Prod:** `podman run -p PORT:CONTAINER` przez SSH (bezpośredni dostęp do portów)
+
+Aby dodać Traefik dla reverse proxy + SSL, zobacz sekcję [Rozszerzenia](#-rozszerzenia) poniżej.
+
 ```
 README.md (ten plik)
     │
@@ -1056,6 +1062,55 @@ taskfile cache show             # Cache stats
 3. **Taskfile zarządza** — wszystkie operacje w jednym miejscu
 4. **Łatwe wersjonowanie** — zmiana w README = zmiana projektu
 5. **Proste dzielenie** — wystarczy przesłać jeden plik
+
+## 🔮 Rozszerzenia
+
+### Dodanie Traefik (Reverse Proxy + SSL)
+
+Obecny przykład używa bezpośredniego mapowania portów. Aby dodać Traefik dla lepszego routing-u i SSL:
+
+**1. Dodaj `docker-compose.traefik.yml`:**
+```yaml
+services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - --api.insecure=true
+      - --providers.docker=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  web:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=Host(`api.twojadomena.com`)"
+      - "traefik.http.routers.web.entrypoints=web"
+
+  landing:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.landing.rule=Host(`twojadomena.com`)"
+      - "traefik.http.routers.landing.entrypoints=web"
+```
+
+**2. Zmień task deploy w Taskfile.yml:**
+```yaml
+# Zamiast bezpośredniego podman run - użyj compose z traefik
+- "@remote podman compose -f docker-compose.traefik.yml up -d"
+```
+
+**Zalety Traefik:**
+- Routing na podstawie hostname (SNI)
+- Automatyczne SSL (Let's Encrypt)
+- Jeden port (80/443) dla wszystkich usług
+- Load balancing i health checks
+
+---
 
 ## 👤 Autor
 
