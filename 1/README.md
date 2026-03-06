@@ -4,54 +4,57 @@
 
 ## 📋 Co to jest?
 
-Ten projekt demonstruje podejście **Single-File Project** z wydzieloną logiką do skryptów:
+Ten projekt demonstruje podejście **Single-File Project** z wbudowanymi komendami CLI:
 
 1. **README.md** zawiera wszystkie pliki jako bloki `markpact:file path=...`
-2. **Taskfile.yml** jest krótki (~130 linii) — używa `script:` do referencjonowania skryptów
-3. **scripts/*.sh** zawierają logikę (dodatkowo ~300 linii, ale łatwiejsze w edycji niż inline YAML)
+2. **Taskfile.yml** jest krótki (~90 linii) — definiuje taski specyficzne dla projektu
+3. **`taskfile` CLI** dostarcza wbudowane komendy (doctor, setup, deploy, clean, push, e2e) — **zero skryptów bash**
 4. **markpact** wypakowuje pliki, **taskfile** zarządza projektem
+
+> **Zmiana architektury:** Wcześniej logika deploymentu była w `scripts/*.sh`.
+> Teraz jest wbudowana w `taskfile` CLI — nie trzeba duplikować skryptów w projektach.
 
 ## 🏗️ Architektura
 
-**Networking:** Ten przykład używa prostego mapowania portów (brak Traefik).  
+**Networking:** Traefik reverse proxy z automatycznym TLS (Let's Encrypt).  
 - **Lokalnie:** `docker compose` z portami 8000, 3000
-- **Prod:** `podman run -p PORT:CONTAINER` przez SSH (bezpośredni dostęp do portów)
-
-Aby dodać Traefik dla reverse proxy + SSL, zobacz sekcję [Rozszerzenia](#-rozszerzenia) poniżej.
+- **Prod:** Podman Quadlet + Traefik (porty 80/443, automatyczny SSL)
+- **Domeny:** Web (`web.example.com`), Landing (`landing.example.com`)
 
 ```
 README.md (ten plik)
     │
-    ├─ markpact:file path=Taskfile.yml     → Deklaracja tasków (krótki YAML)
-    ├─ markpact:file path=scripts/*.sh     → Logika wydzielona do skryptów
-    ├─ markpact:file path=prompts/*.md      → Prompty dla AI
+    ├─ markpact:file path=Taskfile.yml      → Taski projektowe (krótki YAML)
+    ├─ markpact:file path=scripts/init.sh   → Inicjalizacja (venv, prompts)
+    ├─ markpact:file path=scripts/generate.sh → Generowanie kodu (Aider)
+    ├─ markpact:file path=prompts/*.md       → Prompty dla AI
     └─ markpact:file path=docker-compose.yml → Docker
     │
     └─► markpact README.md (wypakowuje)
     │
     ▼
 ./sandbox/
-    ├── Taskfile.yml       → Task runner (deklaracja, używa script:)
-    ├── scripts/           → Logika wydzielona do skryptów .sh
-    │   ├── doctor.sh
-    │   ├── setup-env.sh
-    │   ├── setup-hosts.sh
-    │   ├── setup-prod.sh  → Konfiguracja produkcji (SSH, podman)
-    │   ├── generate.sh
-    │   ├── init.sh
-    │   ├── deploy.sh
-    │   └── clean.sh
+    ├── Taskfile.yml       → Taski projektowe (build, deploy, dev, stop, logs)
+    ├── scripts/           → Tylko skrypty specyficzne dla projektu
+    │   ├── init.sh        → Inicjalizacja (venv, zależności, prompts)
+    │   └── generate.sh    → Generowanie kodu przez Aider
     ├── .env               → Konfiguracja (hosty, klucze, porty)
-    ├── .env.prod          → Konfiguracja produkcyjna
     ├── Dockerfile         → Obraz bazowy (python:3.12-slim)
     ├── docker-compose.yml → Konfiguracja Docker
+    ├── deploy/quadlet/    → Podman Quadlet units (systemd)
     ├── prompts/           → Prompty dla Aidera
-    │   ├── web.md
-    │   ├── desktop.md
-    │   └── landing.md
     ├── apps/              → Wygenerowane aplikacje
-    ├── taskfile-prod.sh   → Skrót: status produkcji
     └── VERSION            → Wersja projektu
+
+Wbudowane komendy CLI (nie wymagają skryptów):
+    taskfile doctor        → Diagnostyka (SSH, tools, porty, remote health)
+    taskfile setup env     → Konfiguracja .env (porty, projekt)
+    taskfile setup hosts   → Konfiguracja hostów (staging/prod)
+    taskfile setup prod    → Setup produkcji (SSH, podman, dysk)
+    taskfile deploy        → Deploy (auto-strategia: compose/ssh_push/quadlet)
+    taskfile push          → Transfer obrazów Docker → serwer (bez registry)
+    taskfile clean         → Czyszczenie artefaktów
+    taskfile e2e           → Testy end-to-end usług i IaC
 ```
 
 ## 🎯 Workflow
@@ -66,13 +69,13 @@ pip install markpact taskfile --upgrade
 markpact README.md
 cd sandbox
 
-# 3. Inicjalizacja projektu
-taskfile init
+# 3. Inicjalizacja projektu (venv, prompts)
+taskfile run init
 
-# 4. Konfiguracja (interaktywnie)
-taskfile run setup-env       # Konfiguruje .env, API keys
-taskfile run setup-hosts     # Konfiguruje hosty deploymentu
-taskfile run setup-prod      # Konfiguruje produkcję (SSH, podman)
+# 4. Konfiguracja (wbudowane komendy CLI — interaktywne)
+taskfile setup env         # Konfiguruje porty, nazwę projektu
+taskfile setup hosts       # Konfiguruje hosty deploymentu
+taskfile setup prod        # Setup produkcji (SSH test, podman install)
 ```
 
 ### Generowanie kodu i rozwój lokalny
@@ -84,11 +87,9 @@ taskfile run generate
 # Start lokalny z Docker
 taskfile run dev
 
-# Lub bez Docker (tylko web)
-taskfile run dev-web
-
-# Testy
-taskfile run test
+# Diagnostyka
+taskfile doctor
+taskfile doctor -v         # + remote health, SSH connectivity
 ```
 
 ### Build i deploy
@@ -100,59 +101,74 @@ taskfile run build
 # Deploy lokalny (docker compose up -d)
 taskfile run deploy
 
-# Deploy na prod (SSH → podman pull + podman run)
+# Transfer obrazów na serwer (bez registry!)
+taskfile push sandbox-web:latest sandbox-landing:latest
+
+# Deploy na prod (SSH → podman)
 taskfile --env prod run deploy
 
 # Dry-run (podgląd komend bez uruchamiania)
 taskfile --env prod --dry-run run deploy
 ```
 
+### Testowanie e2e
+
+```bash
+# Testy usług i IaC (wbudowany e2e runner)
+taskfile e2e                          # Lokalne testy
+taskfile e2e --env prod               # Testy na produkcji
+taskfile e2e --env prod --check-only  # Tylko sprawdzenie (bez deploy)
+```
+
 ### Monitorowanie i zarządzanie
 
 ```bash
-# Status lokalny (docker compose ps)
-taskfile run status
+# Status
+taskfile run status                   # Lokalny (docker compose ps)
+taskfile --env prod run status        # Prod (SSH → podman ps)
 
-# Status na prod (SSH → podman ps)
-taskfile --env prod run status
+# Logi
+taskfile run logs                     # Lokalne
+taskfile --env prod run logs          # Prod (SSH → podman logs)
 
-# Logi lokalne
-taskfile run logs
+# Stop
+taskfile run stop                     # Lokalny
+taskfile --env prod run stop          # Prod
 
-# Logi na prod (SSH → podman logs)
-taskfile --env prod run logs
-
-# Stop lokalny
-taskfile run stop
-
-# Stop na prod
-taskfile --env prod run stop
+# Czyszczenie
+taskfile clean                        # Interaktywne (3 poziomy)
+taskfile clean --level 1 --yes        # Tylko apps/
 ```
 
-## 🔧 Taski dostępne po wypakowaniu
+## 🔧 Dostępne komendy
+
+### Taski projektowe (z Taskfile.yml)
 
 | Komenda | Opis |
 |---------|------|
 | `taskfile run init` | Tworzy strukturę katalogów, instaluje zależności |
-| `taskfile run setup-env` | 🔐 Konfiguracja .env (LLM provider, API keys, porty) |
-| `taskfile run setup-hosts` | 🌐 Konfiguracja hostów staging/prod |
-| `taskfile run setup-prod` | 🚀 Konfiguracja produkcji (SSH, podman, test połączenia) |
-| `taskfile run doctor` | Diagnostyka projektu |
 | `taskfile run generate` | Generuje kod przez Aider (web, desktop, landing) |
-| `taskfile run test` | Uruchamia pytest |
 | `taskfile run build` | Build Docker images |
-| `taskfile run push-images` | Transfer obrazów na serwer prod przez SSH |
+| `taskfile run deploy` | Deploy (`@local` compose / `@remote` quadlet) |
 | `taskfile run dev` | Start lokalny z hot-reload |
-| `taskfile run deploy` | Deploy lokalny (`docker compose up -d`) |
-| `taskfile --env prod run deploy` | Deploy na prod (SSH → `podman pull/run`) |
 | `taskfile run stop` | Stop serwisów (`@local`/`@remote`) |
 | `taskfile run logs` | Logi (`@local`/`@remote`) |
 | `taskfile run status` | Status serwisów (`@local`/`@remote`) |
-| `taskfile run clean` | Czyszczenie projektu |
 
-**Wbudowane komendy CLI:**
-- `taskfile list` — Lista tasków
-- `taskfile validate` — Walidacja Taskfile.yml
+### Wbudowane komendy CLI (nie wymagają Taskfile.yml)
+
+| Komenda | Opis |
+|---------|------|
+| `taskfile doctor` | 🔧 5-warstwowa diagnostyka (preflight, validation, env, fix, LLM) |
+| `taskfile setup env` | 🔐 Konfiguracja .env (porty, projekt) |
+| `taskfile setup hosts` | 🌐 Konfiguracja hostów staging/prod |
+| `taskfile setup prod` | 🚀 Setup produkcji (SSH, podman, dysk) |
+| `taskfile push IMAGE...` | 📦 Transfer obrazów Docker → serwer via SSH |
+| `taskfile deploy` | 🚀 Auto-deploy (compose / ssh_push / quadlet) |
+| `taskfile clean` | 🧹 Czyszczenie artefaktów (3 poziomy) |
+| `taskfile e2e` | 🧪 Testy end-to-end usług i IaC |
+| `taskfile list` | Lista tasków |
+| `taskfile validate` | Walidacja Taskfile.yml |
 
 ---
 
@@ -190,24 +206,15 @@ tasks:
     cmds:
       - ${COMPOSE} build
 
-  push-images:
-    desc: Transfer Docker images to remote server via SSH
-    env: [prod]
-    cmds:
-      - echo "📦 Transferring ${WEB_IMAGE}:${TAG} → ${PROD_HOST}..."
-      - "docker save ${WEB_IMAGE}:${TAG} | ssh -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'"
-      - echo "📦 Transferring ${LANDING_IMAGE}:${TAG} → ${PROD_HOST}..."
-      - "docker save ${LANDING_IMAGE}:${TAG} | ssh -o StrictHostKeyChecking=accept-new ${DEPLOY_USER}@${PROD_HOST} 'podman load'"
-      - echo "✅ Images transferred"
-
   deploy:
     desc: Deploy to target environment
     env: [local, prod]
-    deps: [build, push-images]
+    deps: [build]
     cmds:
       - "@local ${COMPOSE} up -d"
-      - "@remote podman run -d --name ${WEB_IMAGE} --replace -p ${PORT_WEB:-8000}:8000 docker.io/library/${WEB_IMAGE}:${TAG}"
-      - "@remote podman run -d --name ${LANDING_IMAGE} --replace -p ${PORT_LANDING:-3000}:3000 docker.io/library/${LANDING_IMAGE}:${TAG}"
+      - "@remote mkdir -p /etc/containers/systemd /home/tom/sandbox/deploy /home/tom/sandbox/letsencrypt"
+      - "@remote scp deploy/quadlet/*.container deploy/quadlet/*.network deploy/traefik.yml deploy/traefik-dynamic.yml ${DEPLOY_USER}@${PROD_HOST}:/etc/containers/systemd/"
+      - "@remote ssh ${DEPLOY_USER}@${PROD_HOST} 'systemctl daemon-reload && systemctl start traefik container-web container-landing'"
 
   # ─── Development ──────────────────────────────────────
 
@@ -243,592 +250,34 @@ tasks:
       - "@local ${COMPOSE} ps"
       - "@remote podman ps --filter name=${WEB_IMAGE} --filter name=${LANDING_IMAGE}"
 
-  # ─── Diagnostics & Setup ──────────────────────────────
+  # ─── Code generation (project-specific) ────────────────
 
-  doctor:
-    desc: Diagnose deployment readiness (SSH, tools, config)
-    script: scripts/doctor.sh
+  init:
+    desc: Initialize project (dirs, venv, prompts)
+    script: scripts/init.sh
 
-  setup-prod:
-    desc: Interactive production server configuration
-    script: scripts/setup-prod.sh
+  generate:
+    desc: Generate code via Aider (web, desktop, landing)
+    script: scripts/generate.sh
 
   # ─── Sync ──────────────────────────────────────────────
 
   sync-readme:
     desc: Sync sandbox files → README.md markpact blocks
     cmds:
-      - python3 ../scripts/sync-readme.py
+      - markpact sync ../README.md --exclude .env
 
   sync-check:
     desc: Check if sandbox files are in sync with README.md
     cmds:
-      - python3 ../scripts/sync-readme.py --check
+      - markpact sync ../README.md --exclude .env --check
 ```
 
-### scripts/ — skrypty bash
+### scripts/ — skrypty specyficzne dla projektu
 
-```markpact:file path=scripts/doctor.sh
-#!/usr/bin/env bash
-set -uo pipefail
-
-# ─── Deployment Doctor ─────────────────────────────────────────────────
-# Diagnoses all prerequisites for local and remote deployment.
-# Run: taskfile run doctor
-# ────────────────────────────────────────────────────────────────────────
-
-ERRORS=0
-WARNINGS=0
-
-ok()   { echo "  ✅ $*"; }
-warn() { echo "  ⚠️  $*"; WARNINGS=$((WARNINGS+1)); }
-fail() { echo "  ❌ $*"; ERRORS=$((ERRORS+1)); }
-info() { echo "  ℹ️  $*"; }
-hint() { echo "     → $*"; }
-
-echo ""
-echo "🔧 Deployment Doctor"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# ─── 1. .env file ───
-echo ""
-echo "📋 Configuration (.env)"
-if [ ! -f .env ]; then
-  fail ".env file missing"
-  hint "Run: taskfile run setup-prod"
-  hint "Or create manually with PROD_HOST, DEPLOY_USER, PORT_WEB, PORT_LANDING"
-else
-  ok ".env file found"
-
-  # Check key variables
-  for VAR in PROD_HOST DEPLOY_USER PORT_WEB PORT_LANDING; do
-    VAL=$(grep "^${VAR}=" .env 2>/dev/null | head -1 | cut -d= -f2-)
-    if [ -z "$VAL" ]; then
-      case "$VAR" in
-        PROD_HOST)
-          fail "PROD_HOST not set in .env"
-          hint "Add: PROD_HOST=your-server.example.com"
-          ;;
-        DEPLOY_USER)
-          warn "DEPLOY_USER not set (defaults to 'deploy')"
-          hint "Add: DEPLOY_USER=root"
-          ;;
-        *)
-          info "$VAR not set (will use default)"
-          ;;
-      esac
-    else
-      ok "$VAR=$VAL"
-    fi
-  done
-fi
-
-# ─── 2. Local tools ───
-echo ""
-echo "🔧 Local Tools"
-for CMD in docker "docker compose"; do
-  if $CMD version >/dev/null 2>&1; then
-    ok "$CMD available"
-  else
-    fail "$CMD not installed"
-    hint "Install Docker: https://docs.docker.com/engine/install/"
-  fi
-done
-
-if command -v ssh >/dev/null 2>&1; then
-  ok "ssh client available"
-else
-  fail "ssh not installed"
-fi
-
-# ─── 3. Docker images ───
-echo ""
-echo "🐳 Docker Images"
-for IMG in sandbox-web sandbox-landing; do
-  if docker image inspect "${IMG}:latest" >/dev/null 2>&1; then
-    ok "${IMG}:latest exists"
-  else
-    warn "${IMG}:latest not built yet"
-    hint "Run: taskfile run build"
-  fi
-done
-
-# ─── 4. SSH connectivity ───
-echo ""
-echo "🔐 SSH Connection"
-if [ -z "${PROD_HOST:-}" ]; then
-  info "Skipping SSH check (PROD_HOST not set)"
-else
-  TARGET="${DEPLOY_USER:-deploy}@${PROD_HOST}"
-
-  # Test basic connectivity
-  echo "  Testing ${TARGET}..."
-  if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-       "${TARGET}" 'echo "ok"' >/dev/null 2>&1; then
-    ok "SSH key auth works (${TARGET})"
-
-    # Check podman on remote
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'which podman' >/dev/null 2>&1; then
-      PODMAN_VER=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'podman --version 2>/dev/null' || echo "unknown")
-      ok "Podman on remote: ${PODMAN_VER}"
-    else
-      fail "Podman NOT installed on remote"
-      hint "Fix: ssh ${TARGET} 'apt install -y podman'"
-    fi
-
-    # Check disk space on remote
-    DISK_AVAIL=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" \
-      'df -h / | tail -1 | awk "{print \$4}"' 2>/dev/null || echo "?")
-    info "Remote disk available: ${DISK_AVAIL}"
-
-  else
-    fail "SSH connection failed to ${TARGET}"
-    echo ""
-    hint "Possible fixes:"
-    hint "1. Check host reachable: ping ${PROD_HOST}"
-    hint "2. Copy SSH key:         ssh-copy-id ${TARGET}"
-    hint "3. Test manually:        ssh ${TARGET}"
-    hint "4. Check firewall:       port 22 open on ${PROD_HOST}"
-    echo ""
-    hint "If you don't have an SSH key yet:"
-    hint "   ssh-keygen -t ed25519 -C 'deploy@$(hostname)'"
-    hint "   ssh-copy-id ${TARGET}"
-  fi
-fi
-
-# ─── 5. Port conflicts ───
-echo ""
-echo "🌐 Ports"
-for PORT_VAR in PORT_WEB PORT_LANDING; do
-  PORT="${!PORT_VAR:-}"
-  [ -z "$PORT" ] && continue
-  if ss -tlnp 2>/dev/null | grep -q ":${PORT} " ; then
-    warn "Port ${PORT} (${PORT_VAR}) already in use locally"
-  else
-    ok "Port ${PORT} (${PORT_VAR}) available locally"
-  fi
-done
-
-# ─── Summary ───
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
-  echo "✅ All checks passed! Ready to deploy."
-  echo ""
-  echo "   Local:  taskfile run deploy"
-  echo "   Prod:   taskfile --env prod run deploy"
-elif [ $ERRORS -eq 0 ]; then
-  echo "⚠️  ${WARNINGS} warning(s) — deploy should still work."
-else
-  echo "❌ ${ERRORS} error(s), ${WARNINGS} warning(s)"
-  echo ""
-  echo "   Fix issues above, then run: taskfile run doctor"
-  echo "   Interactive setup:          taskfile run setup-prod"
-  exit 1
-fi
-```
-
-```markpact:file path=scripts/setup-env.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-echo ""
-echo "🔐 Konfiguracja środowiska (.env)"
-echo ""
-
-# Upewnij się że .env istnieje
-if [ ! -f .env ]; then
-  touch .env
-fi
-
-# === LLM PROVIDER ===
-echo "🤖 Wybierz providera LLM:"
-echo ""
-echo "  1) OpenRouter (darmowe modele!) - https://openrouter.ai"
-echo "     💡 Najlepszy wybór - darmowe tokeny, wiele modeli"
-echo ""
-echo "  2) OpenAI (GPT-4, GPT-3.5) - https://platform.openai.com"
-echo "     💡 Płatne, ale bardzo stabilne"
-echo ""
-echo "  3) Anthropic (Claude) - https://console.anthropic.com"
-echo "     💡 Bardzo dobre do kodu"
-echo ""
-echo "  4) Ollama (lokalnie, darmowe!) - https://ollama.com"
-echo "     💡 Działa offline, wymaga instalacji Ollama"
-echo ""
-echo "  5) Groq (szybkie, tanie) - https://console.groq.com"
-echo "     💡 Bardzo szybkie odpowiedzi"
-echo ""
-echo ""
-echo "⏳ Czekam na wybór..."
-printf "Wybór (1-5) [1]: "
-read PROVIDER_CHOICE
-PROVIDER_CHOICE=${PROVIDER_CHOICE:-1}
-echo "✅ Wybrano opcję: $PROVIDER_CHOICE"
-
-case "$PROVIDER_CHOICE" in
-  1)
-    PROVIDER="openrouter"
-    API_URL="https://openrouter.ai/settings/keys"
-    DEFAULT_MODEL="openrouter/anthropic/claude-sonnet-4"
-    ;;
-  2)
-    PROVIDER="openai"
-    API_URL="https://platform.openai.com/api-keys"
-    DEFAULT_MODEL="gpt-4"
-    ;;
-  3)
-    PROVIDER="anthropic"
-    API_URL="https://console.anthropic.com/settings/keys"
-    DEFAULT_MODEL="claude-3-5-sonnet-20241022"
-    ;;
-  4)
-    PROVIDER="ollama"
-    API_URL="https://ollama.com/download"
-    DEFAULT_MODEL="qwen2.5-coder:14b"
-    ;;
-  5)
-    PROVIDER="groq"
-    API_URL="https://console.groq.com/keys"
-    DEFAULT_MODEL="groq/llama-3.3-70b-versatile"
-    ;;
-  *)
-    PROVIDER="openrouter"
-    API_URL="https://openrouter.ai/settings/keys"
-    DEFAULT_MODEL="openrouter/anthropic/claude-sonnet-4"
-    ;;
-esac
-
-echo ""
-echo "✅ Wybrano: $PROVIDER"
-echo ""
-
-# === API KEY ===
-CURRENT_KEY=$(grep "^OPENROUTER_API_KEY=\|^OPENAI_API_KEY=\|^ANTHROPIC_API_KEY=\|^GROQ_API_KEY=" .env 2>/dev/null | cut -d= -f2 || echo "")
-API_KEY=""
-
-if [ -n "$CURRENT_KEY" ]; then
-  echo "🔑 Obecny klucz API: ${CURRENT_KEY:0:10}..."
-  echo ""
-  echo "⏳ Czekam na decyzję..."
-  printf "Zmienić? (t/n) [n]: "
-  read CHANGE_KEY
-  if [ "$CHANGE_KEY" != "t" ]; then
-    echo "   ✅ Pozostawiam obecny klucz"
-    API_KEY="$CURRENT_KEY"
-  else
-    echo "   🔄 Będę prosić o nowy klucz API"
-  fi
-fi
-
-if [ -z "$API_KEY" ] && [ "$PROVIDER" != "ollama" ]; then
-  echo ""
-  echo "📋 Instrukcja pobrania klucza API:"
-  echo ""
-  echo "   1. Otwórz: $API_URL"
-  echo "   2. Zaloguj się lub utwórz konto"
-  echo "   3. Utwórz nowy klucz API"
-  echo "   4. Skopiuj klucz i wklej poniżej"
-  echo ""
-  echo "⏳ Czekam na wklejenie klucza..."
-  printf "🔑 Wklej klucz API: "
-  read API_KEY
-  echo "✅ Otrzymano klucz API"
-
-  # Zapisz klucz z odpowiednią nazwą zmiennej
-  case "$PROVIDER" in
-    openrouter)
-      sed -i "/^OPENROUTER_API_KEY=/d" .env 2>/dev/null
-      echo "OPENROUTER_API_KEY=$API_KEY" >> .env
-      ;;
-    openai)
-      sed -i "/^OPENAI_API_KEY=/d" .env 2>/dev/null
-      echo "OPENAI_API_KEY=$API_KEY" >> .env
-      ;;
-    anthropic)
-      sed -i "/^ANTHROPIC_API_KEY=/d" .env 2>/dev/null
-      echo "ANTHROPIC_API_KEY=$API_KEY" >> .env
-      ;;
-    groq)
-      sed -i "/^GROQ_API_KEY=/d" .env 2>/dev/null
-      echo "GROQ_API_KEY=$API_KEY" >> .env
-      ;;
-  esac
-
-  echo "   ✅ Klucz zapisany"
-fi
-
-# === MODEL ===
-echo ""
-echo "🎯 Konfiguracja modelu AI"
-CURRENT_MODEL=$(grep "^AIDER_MODEL=" .env 2>/dev/null | cut -d= -f2 || echo "")
-if [ -n "$CURRENT_MODEL" ]; then
-  echo "🎯 Obecny model: $CURRENT_MODEL"
-fi
-echo ""
-echo "⏳ Czekam na wybór modelu..."
-printf "🎯 Model [$DEFAULT_MODEL]: "
-read MODEL
-MODEL=${MODEL:-$DEFAULT_MODEL}
-echo "✅ Wybrano model: $MODEL"
-sed -i "/^AIDER_MODEL=/d" .env 2>/dev/null
-echo "AIDER_MODEL=$MODEL" >> .env
-
-# === PORTY ===
-echo ""
-echo "🌐 Konfiguracja portów:"
-echo ""
-
-CURRENT_WEB=$(grep "^PORT_WEB=" .env 2>/dev/null | cut -d= -f2 || echo "")
-CURRENT_WEB=${CURRENT_WEB:-8000}
-echo ""
-echo "⏳ Czekam na port Web App..."
-printf "   Port Web App [$CURRENT_WEB]: "
-read PORT_WEB
-PORT_WEB=${PORT_WEB:-$CURRENT_WEB}
-sed -i "/^PORT_WEB=/d" .env 2>/dev/null
-echo "PORT_WEB=$PORT_WEB" >> .env
-echo "✅ Ustawiono port Web: $PORT_WEB"
-
-CURRENT_LANDING=$(grep "^PORT_LANDING=" .env 2>/dev/null | cut -d= -f2 || echo "")
-CURRENT_LANDING=${CURRENT_LANDING:-3000}
-echo ""
-echo "⏳ Czekam na port Landing..."
-printf "   Port Landing [$CURRENT_LANDING]: "
-read PORT_LANDING
-PORT_LANDING=${PORT_LANDING:-$CURRENT_LANDING}
-sed -i "/^PORT_LANDING=/d" .env 2>/dev/null
-echo "PORT_LANDING=$PORT_LANDING" >> .env
-echo "✅ Ustawiono port Landing: $PORT_LANDING"
-
-# === PROJECT NAME ===
-echo ""
-echo "📁 Konfiguracja nazwy projektu"
-CURRENT_NAME=$(grep "^PROJECT_NAME=" .env 2>/dev/null | cut -d= -f2 || echo "")
-CURRENT_NAME=${CURRENT_NAME:-taskfile-example}
-echo ""
-echo "⏳ Czekam na nazwę projektu..."
-printf "📁 Nazwa projektu [$CURRENT_NAME]: "
-read PROJECT_NAME
-PROJECT_NAME=${PROJECT_NAME:-$CURRENT_NAME}
-sed -i "/^PROJECT_NAME=/d" .env 2>/dev/null
-echo "PROJECT_NAME=$PROJECT_NAME" >> .env
-echo "✅ Ustawiono nazwę projektu: $PROJECT_NAME"
-
-# === VERSION ===
-sed -i "/^VERSION=/d" .env 2>/dev/null
-echo "VERSION=1.0.0" >> .env
-
-echo ""
-echo "✅ Konfiguracja zapisana do .env"
-echo ""
-echo "📋 Podsumowanie:"
-echo "   Provider: $PROVIDER"
-echo "   Model: $MODEL"
-echo "   Porty: $PORT_WEB (web), $PORT_LANDING (landing)"
-echo ""
-echo "🔧 Teraz uruchom: taskfile setup hosts"
-```
-
-```markpact:file path=scripts/setup-hosts.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Autonaprawa: sprawdź czy .env istnieje
-if [ ! -f .env ]; then
-  echo "⚠️  Brak .env - tworzę..."
-  taskfile doctor
-fi
-
-echo ""
-echo "🌐 Konfiguracja hostów deploymentu"
-echo ""
-echo "💡 Przykłady:"
-echo "   Staging: staging.example.com, staging.myapp.io, 192.168.1.100"
-echo "   Prod:    prod.example.com, www.myapp.io, 203.0.113.10"
-echo "   User:    deploy, ubuntu, ec2-user"
-echo ""
-echo "   (Wciśnij Enter aby pominąć lub zachować obecną wartość)"
-echo ""
-
-for var in STAGING_HOST PROD_HOST DEPLOY_USER; do
-  val=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2 || echo "")
-  [ "$var" = "DEPLOY_USER" ] && val=${val:-deploy}
-
-  # Podpowiedzi dla konkretnych zmiennych
-  case "$var" in
-    STAGING_HOST)
-      hint=" (np: staging.example.com)"
-      ;;
-    PROD_HOST)
-      hint=" (np: prod.example.com)"
-      ;;
-    DEPLOY_USER)
-      hint=" (np: deploy)"
-      ;;
-  esac
-
-  echo ""
-  echo "⏳ Czekam na $var..."
-  printf "%s%s [%s]: " "$var" "$hint" "$val"
-  read input
-  new_val=${input:-$val}
-  echo "✅ Ustawiono $var: $new_val"
-
-  if grep -q "^${var}=" .env 2>/dev/null; then
-    sed -i "s/^${var}=.*/${var}=${new_val}/" .env
-  else
-    echo "${var}=${new_val}" >> .env
-  fi
-done
-
-echo ""
-echo "✅ Hosty zapisane do .env:"
-echo "   STAGING_HOST=$(grep "^STAGING_HOST=" .env | cut -d= -f2)"
-echo "   PROD_HOST=$(grep "^PROD_HOST=" .env | cut -d= -f2)"
-echo "   DEPLOY_USER=$(grep "^DEPLOY_USER=" .env | cut -d= -f2)"
-echo ""
-echo "🔧 Sprawdź: taskfile doctor"
-```
-
-```markpact:file path=scripts/setup-prod.sh
-#!/usr/bin/env bash
-set -uo pipefail
-
-# ─── Interactive Production Setup ──────────────────────────────────────
-# Configures .env with production server details and tests connectivity.
-# Run: taskfile run setup-prod
-# ────────────────────────────────────────────────────────────────────────
-
-echo ""
-echo "🔧 Production Server Setup"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-# Load current .env values if exists
-if [ -f .env ]; then
-  while IFS='=' read -r key value; do
-    [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
-    export "$key=$value" 2>/dev/null || true
-  done < .env
-fi
-
-# ─── Collect settings ───
-
-printf "  Server hostname [${PROD_HOST:-}]: "
-read -r INPUT
-[ -n "$INPUT" ] && PROD_HOST="$INPUT"
-if [ -z "${PROD_HOST:-}" ]; then
-  echo "  ❌ Server hostname is required!"
-  exit 1
-fi
-
-printf "  SSH user [${DEPLOY_USER:-root}]: "
-read -r INPUT
-[ -n "$INPUT" ] && DEPLOY_USER="$INPUT"
-DEPLOY_USER="${DEPLOY_USER:-root}"
-
-printf "  Web app port [${PORT_WEB:-8000}]: "
-read -r INPUT
-[ -n "$INPUT" ] && PORT_WEB="$INPUT"
-PORT_WEB="${PORT_WEB:-8000}"
-
-printf "  Landing page port [${PORT_LANDING:-3000}]: "
-read -r INPUT
-[ -n "$INPUT" ] && PORT_LANDING="$INPUT"
-PORT_LANDING="${PORT_LANDING:-3000}"
-
-# ─── Test SSH ───
-echo ""
-TARGET="${DEPLOY_USER}@${PROD_HOST}"
-echo "  🔍 Testing SSH to ${TARGET}..."
-
-if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-     "${TARGET}" 'echo "ok"' >/dev/null 2>&1; then
-  echo "  ✅ SSH key auth works!"
-else
-  echo "  ⚠️  SSH key auth failed. Trying to set up..."
-  echo ""
-
-  # Check if we have an SSH key
-  if [ ! -f ~/.ssh/id_ed25519 ] && [ ! -f ~/.ssh/id_rsa ]; then
-    echo "  No SSH key found. Generating one..."
-    ssh-keygen -t ed25519 -C "deploy@$(hostname)" -f ~/.ssh/id_ed25519 -N "" || true
-  fi
-
-  echo "  Copying SSH key to ${TARGET}..."
-  echo "  (you may need to enter the server password once)"
-  echo ""
-  if ssh-copy-id "${TARGET}" 2>/dev/null; then
-    echo ""
-    echo "  ✅ SSH key copied! Testing again..."
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'echo "ok"' >/dev/null 2>&1; then
-      echo "  ✅ SSH key auth now works!"
-    else
-      echo "  ❌ Still can't connect. Check server config manually."
-    fi
-  else
-    echo ""
-    echo "  ❌ Could not copy SSH key."
-    echo "     Try manually: ssh-copy-id ${TARGET}"
-  fi
-fi
-
-# ─── Check podman on remote ───
-if ssh -o ConnectTimeout=5 -o BatchMode=yes "${TARGET}" 'which podman' >/dev/null 2>&1; then
-  echo "  ✅ Podman found on remote server"
-else
-  echo ""
-  printf "  ⚠️  Podman not found on remote. Install it? (y/n) [y]: "
-  read -r INSTALL
-  INSTALL="${INSTALL:-y}"
-  if [ "$INSTALL" = "y" ]; then
-    echo "  Installing podman on ${PROD_HOST}..."
-    ssh "${TARGET}" 'apt-get update -qq && apt-get install -y -qq podman' 2>&1 | tail -3
-    if ssh -o BatchMode=yes "${TARGET}" 'which podman' >/dev/null 2>&1; then
-      echo "  ✅ Podman installed successfully"
-    else
-      echo "  ❌ Podman installation failed. Install manually:"
-      echo "     ssh ${TARGET} 'apt install -y podman'"
-    fi
-  fi
-fi
-
-# ─── Save to .env ───
-echo ""
-echo "  💾 Saving configuration..."
-
-# Update or append each variable in .env
-update_env() {
-  local KEY="$1" VAL="$2" FILE=".env"
-  if [ ! -f "$FILE" ]; then
-    echo "${KEY}=${VAL}" > "$FILE"
-  elif grep -q "^${KEY}=" "$FILE"; then
-    sed -i "s|^${KEY}=.*|${KEY}=${VAL}|" "$FILE"
-  else
-    echo "${KEY}=${VAL}" >> "$FILE"
-  fi
-}
-
-update_env PROD_HOST "$PROD_HOST"
-update_env DEPLOY_USER "$DEPLOY_USER"
-update_env PORT_WEB "$PORT_WEB"
-update_env PORT_LANDING "$PORT_LANDING"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ Configuration saved to .env"
-echo ""
-echo "  PROD_HOST=${PROD_HOST}"
-echo "  DEPLOY_USER=${DEPLOY_USER}"
-echo "  PORT_WEB=${PORT_WEB}"
-echo "  PORT_LANDING=${PORT_LANDING}"
-echo ""
-echo "  Next steps:"
-echo "    taskfile run doctor              # verify everything"
-echo "    taskfile run build               # build images"
-echo "    taskfile --env prod run deploy   # deploy to production"
-```
+> **Uwaga:** Skrypty deploymentu (`doctor.sh`, `setup-env.sh`, `setup-hosts.sh`,
+> `setup-prod.sh`, `deploy.sh`, `clean.sh`) zostały usunięte — ich funkcjonalność
+> jest teraz wbudowana w `taskfile` CLI (`taskfile doctor`, `taskfile setup prod`, itd.).
 
 ```markpact:file path=scripts/generate.sh
 #!/usr/bin/env bash
@@ -930,7 +379,8 @@ else
 fi
 
 # Domyślne prompty
-[ -f prompts/web.md ] || printf '%s\n' \
+[ -f prompts/web.md ] || printf '%s
+' \
   "# Generate: SaaS Web Application (FastAPI)" "" \
   "Create a FastAPI web application in apps/web/ with:" "" \
   "## Files to create:" \
@@ -939,7 +389,8 @@ fi
   "3. requirements.txt - fastapi, uvicorn, jinja2" \
   "4. Dockerfile - python:3.12-slim" > prompts/web.md
 
-[ -f prompts/desktop.md ] || printf '%s\n' \
+[ -f prompts/desktop.md ] || printf '%s
+' \
   "# Generate: Desktop Application (Electron)" "" \
   "Create an Electron desktop app in apps/desktop/ with:" "" \
   "## Files to create:" \
@@ -947,7 +398,8 @@ fi
   "2. main.js - Main process" \
   "3. index.html - Renderer" > prompts/desktop.md
 
-[ -f prompts/landing.md ] || printf '%s\n' \
+[ -f prompts/landing.md ] || printf '%s
+' \
   "# Generate: Landing Page" "" \
   "Create a static landing page in apps/landing/ with:" "" \
   "## Files to create:" \
@@ -957,79 +409,10 @@ fi
 echo "✅ Gotowe! Następne: taskfile setup hosts"
 ```
 
-```markpact:file path=scripts/deploy.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-echo "🚀 Deployment: 1) staging  2) prod"
-echo ""
-echo "⏳ Czekam na wybór środowiska..."
-printf "Wybierz: "; read CHOICE
-[ "$CHOICE" = "1" ] && ENV="staging" && VAR="STAGING_HOST"
-[ "$CHOICE" = "2" ] && ENV="prod" && VAR="PROD_HOST"
-[ -z "${ENV:-}" ] && echo "❌ Nieprawidłowy wybór" && exit 1
-HOST=$(grep "^${VAR}=" .env | cut -d= -f2)
-[ -z "$HOST" ] && echo "❌ Host nie skonfigurowany" && exit 1
-echo ""
-echo "⏳ Czekam na potwierdzenie deploymentu do $ENV..."
-printf "Deploy do %s? (t/n): " "$ENV"; read CONFIRM
-[ "$CONFIRM" != "t" ] && echo "❌ Anulowano" && exit 0
-echo "✅ Rozpoczynam deployment do $ENV..."
-taskfile --env "$ENV" run deploy-exec
-```
-
-```markpact:file path=scripts/clean.sh
-#!/usr/bin/env bash
-set -euo pipefail
-
-echo "🧹 Czyszczenie projektu"
-echo ""
-echo "Wybierz co usunąć:"
-echo "  1) Tylko wygenerowane aplikacje (apps/)"
-echo "  2) Aplikacje + środowisko (.venv/)"
-echo "  3) Wszystko poza README.md (pełne reset)"
-echo "  4) Anuluj"
-echo ""
-echo "⏳ Czekam na wybór opcji czyszczenia..."
-printf "Wybór (1-4): "
-read CHOICE
-echo "✅ Wybrano opcję: $CHOICE"
-
-case "$CHOICE" in
-  1)
-    echo "🗑️  Usuwam apps/..."
-    rm -rf apps/
-    echo "✅ Usunięto apps/"
-    ;;
-  2)
-    echo "🗑️  Usuwam apps/ i .venv/..."
-    rm -rf apps/ .venv/
-    echo "✅ Usunięto apps/ i .venv/"
-    echo "💡 Pliki konfiguracyjne (.env, prompts/) pozostały"
-    ;;
-  3)
-    echo "🗑️  Pełne czyszczenie..."
-    docker compose down -v 2>/dev/null || true
-    rm -rf apps/ prompts/ .venv/ scripts/
-    rm -f docker-compose.yml project.yml .env .gitignore .port-state.json Taskfile.yml
-    echo "✅ Wyczyszczono - pozostał tylko README.md"
-    ;;
-  4|*)
-    echo "Anulowano."
-    ;;
-esac
-```
-
 ### VERSION — wersja projektu
 
 ```markpact:file path=VERSION
 0.1.1
-```
-
-### taskfile-prod.sh — skrót do statusu produkcji
-
-```markpact:file path=taskfile-prod.sh
-export $(grep -v "^#" .env | xargs 2>/dev/null) && taskfile --env prod run status
 ```
 
 ### .env — zmienne środowiskowe
@@ -1045,6 +428,11 @@ STAGING_HOST=
 PROD_HOST=
 DEPLOY_USER=deploy
 REGISTRY=ghcr.io/your-org
+
+# Traefik TLS domains
+WEB_DOMAIN=web.example.com
+LANDING_DOMAIN=landing.example.com
+ACME_EMAIL=admin@example.com
 ```
 
 ### .gitignore — ignorowane pliki
@@ -1139,11 +527,38 @@ services:
 ### deploy/quadlet/ — Podman Quadlet units (systemd)
 
 ```markpact:file path=deploy/quadlet/web.container
-[Unit]\nDescription=web container\n\n[Container]\nContainerName=web\nEnvironment=VERSION=1.0.0\nPublishPort=8001:8000\nNetwork=proxy.network\n\n[Service]\nRestart=always\nTimeoutStartSec=300\n\n[Install]\nWantedBy=multi-user.target default.target\n
+[Unit]
+Description=web container
+
+[Container]
+ContainerName=web
+Image=docker.io/library/sandbox-web:latest
+Environment=VERSION=1.0.0
+Network=proxy.network
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target
 ```
 
 ```markpact:file path=deploy/quadlet/landing.container
-[Unit]\nDescription=landing container\n\n[Container]\nContainerName=landing\nPublishPort=3001:80\nNetwork=proxy.network\n\n[Service]\nRestart=always\nTimeoutStartSec=300\n\n[Install]\nWantedBy=multi-user.target default.target\n
+[Unit]
+Description=landing container
+
+[Container]
+ContainerName=landing
+Image=docker.io/library/sandbox-landing:latest
+Network=proxy.network
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target
 ```
 
 ```markpact:file path=deploy/quadlet/proxy.network
@@ -1152,7 +567,98 @@ NetworkName=proxy
 Driver=bridge
 ```
 
-### Dockerfile — obraz bazowy
+```markpact:file path=deploy/quadlet/traefik.container
+[Unit]
+Description=Traefik reverse proxy with TLS
+After=network.target
+
+[Container]
+ContainerName=traefik
+Image=docker.io/traefik:v3.0
+PublishPort=80:80
+PublishPort=443:443
+PublishPort=8080:8080
+Network=proxy.network
+Volume=/home/tom/sandbox/deploy/traefik.yml:/etc/traefik/traefik.yml:ro
+Volume=/home/tom/sandbox/deploy/traefik-dynamic.yml:/etc/traefik/dynamic/traefik-dynamic.yml:ro
+Volume=/home/tom/sandbox/letsencrypt:/letsencrypt
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target default.target
+```
+
+### deploy/ — Traefik configuration
+
+```markpact:file path=deploy/traefik.yml
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+api:
+  dashboard: true
+
+log:
+  level: INFO
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${ACME_EMAIL:-admin@example.com}
+      storage: /letsencrypt/acme.json
+      tlsChallenge: {}
+```
+
+```markpact:file path=deploy/traefik-dynamic.yml
+http:
+  routers:
+    web:
+      rule: "Host(`${WEB_DOMAIN:-web.example.com}`)"
+      entryPoints:
+        - "websecure"
+      service: "web"
+      tls:
+        certResolver: "letsencrypt"
+
+    landing:
+      rule: "Host(`${LANDING_DOMAIN:-landing.example.com}`)"
+      entryPoints:
+        - "websecure"
+      service: "landing"
+      tls:
+        certResolver: "letsencrypt"
+
+  services:
+    web:
+      loadBalancer:
+        servers:
+          - url: "http://web:8000"
+
+    landing:
+      loadBalancer:
+        servers:
+          - url: "http://landing:80"
+```
 
 ```markpact:file path=Dockerfile
 FROM python:3.12-slim
@@ -1205,50 +711,25 @@ taskfile cache show             # Cache stats
 
 ## 🔮 Rozszerzenia
 
-### Dodanie Traefik (Reverse Proxy + SSL)
+### Konfiguracja Traefik (Reverse Proxy + SSL)
 
-Obecny przykład używa bezpośredniego mapowania portów. Aby dodać Traefik dla lepszego routing-u i SSL:
+Traefik jest domyślnie skonfigurowany z automatycznym TLS via Let's Encrypt.
 
-**1. Dodaj `docker-compose.traefik.yml`:**
-```yaml
-services:
-  traefik:
-    image: traefik:v3.0
-    command:
-      - --api.insecure=true
-      - --providers.docker=true
-      - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
-  web:
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.web.rule=Host(`api.twojadomena.com`)"
-      - "traefik.http.routers.web.entrypoints=web"
-
-  landing:
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.landing.rule=Host(`twojadomena.com`)"
-      - "traefik.http.routers.landing.entrypoints=web"
+**Wymagana konfiguracja w `.env`:**
+```bash
+WEB_DOMAIN=web.twojadomena.com
+LANDING_DOMAIN=landing.twojadomena.com
+ACME_EMAIL=admin@twojadomena.com
 ```
 
-**2. Zmień task deploy w Taskfile.yml:**
-```yaml
-# Zamiast bezpośredniego podman run - użyj compose z traefik
-- "@remote podman compose -f docker-compose.traefik.yml up -d"
-```
+**Dashboard Traefik:**
+- Dostępny na porcie 8080 (np. `http://twoj-serwer:8080`)
 
-**Zalety Traefik:**
-- Routing na podstawie hostname (SNI)
-- Automatyczne SSL (Let's Encrypt)
-- Jeden port (80/443) dla wszystkich usług
-- Load balancing i health checks
+**Ręczne zarządzanie certyfikatami:**
+```bash
+# Na serwerze produkcyjnym
+ssh root@twoj-serwer 'cat /home/tom/sandbox/letsencrypt/acme.json'
+```
 
 ---
 
