@@ -194,6 +194,10 @@ variables:
   WEB_CONTAINER: web
   LANDING_CONTAINER: landing
   COMPOSE: docker compose
+  # URLs — używane w deploy, health, urls
+  WEB_URL: https://app.c2006.mask.services
+  LANDING_URL: https://c2006.mask.services
+  TRAEFIK_DASHBOARD: http://c2006.mask.services:8080
 
 environments:
   local:
@@ -207,26 +211,69 @@ environments:
     env_file: .env.prod
 
 tasks:
-  # ─── Core tasks ───────────────────────────────────────
+  # ─── Build & Deploy ─────────────────────────────────
+  # Workflow: build → push → deploy → health
+  #   taskfile run build          # zbuduj obrazy lokalnie
+  #   taskfile push ...           # wyślij do registry (jeśli potrzeba)
+  #   taskfile --env prod run deploy  # wdróż na serwer
+  #   taskfile --env prod run health  # sprawdź czy działa
 
   build:
     desc: Build Docker images locally
     cmds:
       - ${COMPOSE} build
+      # Następny krok → taskfile --env prod run deploy
 
   deploy:
-    desc: Deploy to target environment
+    desc: Deploy to target environment with health check
     env: [local, prod]
     deps: [build]
     cmds:
+      # --- Local deploy (docker compose) ---
       - "@local ${COMPOSE} up -d"
+      - "@local echo '✅ Local deploy done → taskfile run health'"
+      # --- Remote deploy (podman quadlet) ---
+      # 1. Backup bieżących obrazów na wypadek rollback
+      - "@remote podman tag ${WEB_IMAGE}:latest ${WEB_IMAGE}:prev 2>/dev/null || true"
+      - "@remote podman tag ${LANDING_IMAGE}:latest ${LANDING_IMAGE}:prev 2>/dev/null || true"
+      # 2. Przygotuj katalogi
       - "@remote mkdir -p /etc/containers/systemd /home/tom/sandbox/deploy /home/tom/sandbox/letsencrypt"
+      # 3. Skopiuj pliki konfiguracyjne
       - "@push deploy/quadlet/*.container deploy/quadlet/*.network /etc/containers/systemd/"
       - "@push deploy/traefik.yml deploy/traefik-dynamic.yml /home/tom/sandbox/deploy/"
+      # 4. Reload i start
       - "@remote systemctl daemon-reload"
       - "@remote systemctl start traefik web landing"
+      # 5. Podsumowanie
+      - "@remote echo '' && echo '🚀 Deploy complete!' && echo '📱 Web:      ${WEB_URL}' && echo '🌐 Landing:  ${LANDING_URL}' && echo '📊 Traefik:  ${TRAEFIK_DASHBOARD}' && echo ''"
+      # 6. Health check kontenerów
+      - "@remote echo '📦 Container Status:' && podman ps --format '   {{.Names}}: {{.Status}}' | grep -E 'web|landing|traefik'"
+      - "@remote echo '' && echo '📊 Service Health:' && systemctl is-active traefik && systemctl is-active web && systemctl is-active landing || true"
+      - "@remote echo '' && echo '💡 Następne kroki:' && echo '   taskfile --env prod run health   # pełny health check' && echo '   taskfile --env prod run logs     # logi serwisów' && echo '   taskfile --env prod run rollback # cofnij do poprzedniej wersji'"
+
+  rollback:
+    desc: Rollback to previous container version
+    env: [prod]
+    cmds:
+      # 1. Sprawdź czy istnieją obrazy :prev
+      - "@remote echo '🔄 Rollback — przywracanie poprzedniej wersji...' && echo ''"
+      - "@remote podman image exists ${WEB_IMAGE}:prev && echo '   ✅ ${WEB_IMAGE}:prev found'"
+      - "@remote podman image exists ${LANDING_IMAGE}:prev && echo '   ✅ ${LANDING_IMAGE}:prev found'"
+      # 2. Przywróć :prev jako :latest
+      - "@remote podman tag ${WEB_IMAGE}:prev ${WEB_IMAGE}:latest"
+      - "@remote podman tag ${LANDING_IMAGE}:prev ${LANDING_IMAGE}:latest"
+      # 3. Restart kontenerów z nowym :latest (= stary :prev)
+      - "@remote systemctl restart web landing"
+      - "@remote echo '' && echo '✅ Rollback complete!' && echo ''"
+      # 4. Weryfikacja
+      - "@remote echo '📦 Container Status:' && podman ps --format '   {{.Names}}: {{.Status}}' | grep -E 'web|landing'"
+      - "@remote echo '' && echo '💡 Następne kroki:' && echo '   taskfile --env prod run health  # sprawdź serwisy' && echo '   taskfile --env prod run logs    # sprawdź logi'"
 
   # ─── Development ──────────────────────────────────────
+  # Lokalne środowisko deweloperskie z hot-reload
+  #   taskfile run dev     # uruchom lokalnie
+  #   taskfile run logs    # podgląd logów
+  #   taskfile run stop    # zatrzymaj
 
   dev:
     desc: Start local dev with hot-reload
@@ -234,33 +281,103 @@ tasks:
     cmds:
       - ${COMPOSE} up -d --build
       - echo "✅ Dev running at http://localhost:${PORT_WEB:-8000}"
+      - echo "💡 Następne kroki → taskfile run logs | taskfile run stop"
       - ${COMPOSE} logs -f
 
   # ─── Operations ───────────────────────────────────────
+  # Zarządzanie serwisami — działa lokalnie i na prod
+  #   taskfile --env prod run stop     # zatrzymaj serwisy
+  #   taskfile --env prod run status   # pokaż status
+  #   taskfile --env prod run logs     # pokaż logi
+  #   taskfile --env prod run health   # pełny health check
+  #   taskfile --env prod run urls     # pokaż adresy URL
 
   stop:
     desc: Stop services
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} down"
-      - "@remote podman stop ${WEB_CONTAINER} ${LANDING_CONTAINER} 2>/dev/null || true"
-      - "@remote podman rm ${WEB_CONTAINER} ${LANDING_CONTAINER} 2>/dev/null || true"
+      - "@remote systemctl stop web landing 2>/dev/null || true"
+      - "@remote echo '✅ Serwisy zatrzymane'"
+      - "@remote echo '💡 Wznów: taskfile --env prod run deploy'"
+
+  restart:
+    desc: Restart services (without rebuild)
+    env: [local, prod]
+    cmds:
+      - "@local ${COMPOSE} restart"
+      - "@remote systemctl restart traefik web landing"
+      - "@remote echo '✅ Serwisy zrestartowane → taskfile --env prod run health'"
 
   logs:
-    desc: View logs
+    desc: View logs (last 30 lines)
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} logs --tail 50"
-      - "@remote echo '=== web ===' && podman logs --tail 20 ${WEB_CONTAINER} && echo '=== landing ===' && podman logs --tail 20 ${LANDING_CONTAINER}"
+      - "@remote echo '=== traefik ===' && journalctl -u traefik --no-pager -n 10 --output=cat"
+      - "@remote echo '=== web ===' && podman logs --tail 15 ${WEB_CONTAINER} 2>&1"
+      - "@remote echo '=== landing ===' && podman logs --tail 15 ${LANDING_CONTAINER} 2>&1"
 
   status:
-    desc: Show service status
+    desc: Show service status and URLs
     env: [local, prod]
     cmds:
       - "@local ${COMPOSE} ps"
-      - "@remote podman ps --filter name=${WEB_CONTAINER} --filter name=${LANDING_CONTAINER}"
+      - "@remote echo '📦 Running containers:' && podman ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'"
+      - "@remote echo '' && echo '📊 Systemd services:' && systemctl is-active traefik web landing || true"
+      - "@remote echo '' && echo '🔗 URLs:' && echo '   📱 Web:     ${WEB_URL}' && echo '   🌐 Landing: ${LANDING_URL}' && echo '   📊 Traefik: ${TRAEFIK_DASHBOARD}'"
+      - "@remote echo '' && echo '💡 Następne: health / logs / stop / rollback'"
+
+  health:
+    desc: Health check - verify all services respond
+    env: [local, prod]
+    cmds:
+      - "@local echo '🏠 Local health check:' && curl -sf http://localhost:${PORT_WEB:-8000}/health > /dev/null && echo '   ✅ Web OK' || echo '   ❌ Web not responding'"
+      - "@local curl -sf http://localhost:${PORT_LANDING:-3000} > /dev/null && echo '   ✅ Landing OK' || echo '   ❌ Landing not responding'"
+      - "@remote echo '🌐 Remote health check:' && echo ''"
+      - "@remote echo '📦 Container Status:' && podman ps --format '   {{.Names}}: {{.Status}}' | grep -E 'web|landing|traefik'"
+      - "@remote echo '' && echo '📊 Systemd:' && systemctl is-active traefik && echo '   ✅ traefik active' || echo '   ❌ traefik inactive'"
+      - "@remote systemctl is-active web && echo '   ✅ web active' || echo '   ❌ web inactive'"
+      - "@remote systemctl is-active landing && echo '   ✅ landing active' || echo '   ❌ landing inactive'"
+      - "@remote echo '' && echo '🔗 URLs:' && echo '   📱 Web:     ${WEB_URL}' && echo '   🌐 Landing: ${LANDING_URL}' && echo '   📊 Traefik: ${TRAEFIK_DASHBOARD}'"
+      - "@remote echo '' && echo '💡 Problemy? → taskfile --env prod run logs / rollback'"
+
+  fix:
+    desc: Auto-detect and fix common issues
+    env: [local, prod]
+    cmds:
+      # Sprawdź co nie działa
+      - "@remote echo '🔧 Diagnostyka automatyczna...' && echo ''"
+      # Fix 1: Restart jeśli kontenery nie działają
+      - "@remote podman ps | grep -q web && echo '   ✅ web działa' || (echo '   ❌ web nie działa → restart' && systemctl restart web)"
+      - "@remote podman ps | grep -q landing && echo '   ✅ landing działa' || (echo '   ❌ landing nie działa → restart' && systemctl restart landing)"
+      # Fix 2: Reload traefik jeśli nie odpowiada
+      - "@remote curl -sf http://localhost:8080/ping > /dev/null && echo '   ✅ traefik OK' || (echo '   ❌ traefik nie odpowiada → restart' && systemctl restart traefik)"
+      # Fix 3: Cleanup martwych kontenerów
+      - "@remote podman ps -a --filter status=exited -q | xargs -r podman rm 2>/dev/null && echo '   🧹 Wyczyszczono martwe kontenery' || echo '   ℹ️ Brak martwych kontenerów'"
+      # Fix 4: Usuń dangling images (zajmują miejsce)
+      - "@remote podman images --filter dangling=true -q | xargs -r podman rmi 2>/dev/null && echo '   🧹 Wyczyszczono wiszące obrazy' || echo '   ℹ️ Brak wiszących obrazów'"
+      # Podsumowanie
+      - "@remote echo '' && echo '✅ Naprawa zakończona' && echo '💡 Sprawdź: taskfile --env prod run health'"
+
+  watch:
+    desc: Continuous monitoring (5s interval)
+    env: [prod]
+    cmds:
+      - "@remote echo '📡 Monitoring usług (Ctrl+C aby zatrzymać)' && echo ''"
+      - '@remote while true; do clear; date; echo ""; podman ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null; echo ""; systemctl is-active traefik web landing 2>/dev/null | paste - - -; echo ""; sleep 5; done'
+
+  urls:
+    desc: Show all service URLs
+    env: [local, prod]
+    cmds:
+      - "@local echo '🏠 Local:' && echo '   📱 Web:     http://localhost:${PORT_WEB:-8000}' && echo '   🌐 Landing: http://localhost:${PORT_LANDING:-3000}'"
+      - "@remote echo '🌐 Production:' && echo '   📱 Web:     ${WEB_URL}' && echo '   🌐 Landing: ${LANDING_URL}' && echo '   📊 Traefik: ${TRAEFIK_DASHBOARD}'"
 
   # ─── Code generation (project-specific) ────────────────
+  # Generowanie kodu z LLM
+  #   taskfile run init       # inicjalizuj projekt
+  #   taskfile run generate   # generuj kod
 
   init:
     desc: Initialize project (dirs, venv, prompts)
@@ -271,6 +388,9 @@ tasks:
     script: scripts/generate.sh
 
   # ─── Sync ──────────────────────────────────────────────
+  # Synchronizacja sandbox ↔ README.md
+  #   taskfile run sync-check    # sprawdź czy zsynchronizowane
+  #   taskfile run sync-readme   # synchronizuj
 
   sync-readme:
     desc: Sync sandbox files → README.md markpact blocks
