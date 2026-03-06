@@ -221,8 +221,8 @@ tasks:
     desc: View logs
     env: [local, prod]
     cmds:
-      - "@local ${COMPOSE} logs -f"
-      - "@remote podman logs -f ${WEB_IMAGE}"
+      - "@local ${COMPOSE} logs --tail 50"
+      - "@remote echo '=== sandbox-web ===' && podman logs --tail 20 ${WEB_IMAGE} && echo '=== sandbox-landing ===' && podman logs --tail 20 ${LANDING_IMAGE}"
 
   status:
     desc: Show service status
