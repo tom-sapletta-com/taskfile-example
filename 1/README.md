@@ -143,6 +143,51 @@ taskfile clean                        # Interaktywne (3 poziomy)
 taskfile clean --level 1 --yes        # Tylko apps/
 ```
 
+## 🚨 Rozwiązywanie problemów
+
+### DNS — timeout Let's Encrypt
+
+Jeśli widzisz w logach Traefik:
+```
+lookup acme-v02.api.letsencrypt.org on 10.89.0.1:53: i/o timeout
+```
+
+**Przyczyna:** Podman network DNS (10.89.0.1) nie rozwiazuje zewnętrznych domen.
+
+**Rozwiązanie 1 — resolv.conf mount (zalecane):**
+```bash
+# Utwórz deploy/resolv.conf z publicznym DNS:
+echo -e 'search dns.podman\nnameserver 8.8.8.8\nnameserver 1.1.1.1' > deploy/resolv.conf
+
+# W deploy/quadlet/traefik.container dodaj:
+Volume=/home/tom/sandbox/deploy/resolv.conf:/etc/resolv.conf:ro
+```
+
+**Rozwiązanie 2 — UFW firewall (jeśli ufw blokuje FORWARD):**
+```bash
+# Na serwerze: zezwól na ruch z podman subnet
+ufw route allow in on podman1 out on ens6 from 10.89.0.0/24 to any
+ufw route allow in on ens6 out on podman1 to 10.89.0.0/24
+iptables -t nat -A POSTROUTING -s 10.89.0.0/24 -j MASQUERADE
+```
+
+**Wdrożenie:**
+```bash
+taskfile --env prod run deploy   # wyślij pliki
+taskfile --env prod run restart  # restart Traefik
+taskfile --env prod run logs     # sprawdź logi
+```
+
+### SSL — certyfikaty nie działają
+
+```bash
+# Sprawdź logi
+taskfile --env prod run logs | grep -i "acme\|error"
+
+# Napraw automatycznie
+taskfile --env prod run fix
+```
+
 ## 🔧 Dostępne komendy
 
 ### Taski projektowe (z Taskfile.yml)
@@ -153,10 +198,18 @@ taskfile clean --level 1 --yes        # Tylko apps/
 | `taskfile run generate` | Generuje kod przez Aider (web, desktop, landing) |
 | `taskfile run build` | Build Docker images |
 | `taskfile run deploy` | Deploy (`@local` compose / `@remote` quadlet) |
+| `taskfile run rollback` | Cofnij do poprzedniej wersji kontenerów |
 | `taskfile run dev` | Start lokalny z hot-reload |
 | `taskfile run stop` | Stop serwisów (`@local`/`@remote`) |
+| `taskfile run restart` | Restart serwisów bez rebuild |
 | `taskfile run logs` | Logi (`@local`/`@remote`) |
 | `taskfile run status` | Status serwisów (`@local`/`@remote`) |
+| `taskfile run health` | Health check z retry logic |
+| `taskfile run urls` | Wyświetl wszystkie URL-e |
+| `taskfile run backup` | Backup certyfikatów i konfiguracji |
+| `taskfile run watch` | Ciągły monitoring (5s interval) |
+| `taskfile run alert` | Sprawdź i wyślij alert jeśli DOWN |
+| `taskfile run fix` | Auto-naprawa problemów |
 
 ### Wbudowane komendy CLI (nie wymagają Taskfile.yml)
 
@@ -198,6 +251,8 @@ variables:
   WEB_URL: https://app.c2006.mask.services
   LANDING_URL: https://c2006.mask.services
   TRAEFIK_DASHBOARD: http://c2006.mask.services:8080
+  # SSH — opcje dla szybszych połączeń
+  SSH_OPTS: "-o ConnectTimeout=10 -o ServerAliveInterval=30 -o StrictHostKeyChecking=accept-new"
 
 environments:
   local:
@@ -315,8 +370,8 @@ tasks:
     cmds:
       - "@local ${COMPOSE} logs --tail 50"
       - "@remote echo '=== traefik ===' && journalctl -u traefik --no-pager -n 10 --output=cat"
-      - "@remote echo '=== web ===' && podman logs --tail 15 ${WEB_CONTAINER} 2>&1"
-      - "@remote echo '=== landing ===' && podman logs --tail 15 ${LANDING_CONTAINER} 2>&1"
+      - "@remote echo '=== web ===' && podman logs --tail 15 ${WEB_CONTAINER} || true"
+      - "@remote echo '=== landing ===' && podman logs --tail 15 ${LANDING_CONTAINER} || true"
 
   status:
     desc: Show service status and URLs
@@ -329,7 +384,7 @@ tasks:
       - "@remote echo '' && echo '💡 Następne: health / logs / stop / rollback'"
 
   health:
-    desc: Health check - verify all services respond
+    desc: Health check with retry logic
     env: [local, prod]
     cmds:
       - "@local echo '🏠 Local health check:' && curl -sf http://localhost:${PORT_WEB:-8000}/health > /dev/null && echo '   ✅ Web OK' || echo '   ❌ Web not responding'"
@@ -340,6 +395,7 @@ tasks:
       - "@remote systemctl is-active web && echo '   ✅ web active' || echo '   ❌ web inactive'"
       - "@remote systemctl is-active landing && echo '   ✅ landing active' || echo '   ❌ landing inactive'"
       - "@remote echo '' && echo '🔗 URLs:' && echo '   📱 Web:     ${WEB_URL}' && echo '   🌐 Landing: ${LANDING_URL}' && echo '   📊 Traefik: ${TRAEFIK_DASHBOARD}'"
+      - "@remote curl -sf ${WEB_URL}/health > /dev/null && echo '   ✅ Web responds via HTTPS' || echo '   ❌ Web not responding via HTTPS'"
       - "@remote echo '' && echo '💡 Problemy? → taskfile --env prod run logs / rollback'"
 
   fix:
@@ -349,13 +405,18 @@ tasks:
       # Sprawdź co nie działa
       - "@remote echo '🔧 Diagnostyka automatyczna...' && echo ''"
       # Fix 1: Restart jeśli kontenery nie działają
-      - "@remote podman ps | grep -q web && echo '   ✅ web działa' || (echo '   ❌ web nie działa → restart' && systemctl restart web)"
-      - "@remote podman ps | grep -q landing && echo '   ✅ landing działa' || (echo '   ❌ landing nie działa → restart' && systemctl restart landing)"
+      - "@remote podman ps | grep -q web && echo '   ✅ web działa' || echo '   ❌ web nie działa → restarting'"
+      - "@remote podman ps | grep -q web || systemctl restart web"
+      - "@remote podman ps | grep -q landing && echo '   ✅ landing działa' || echo '   ❌ landing nie działa → restarting'"
+      - "@remote podman ps | grep -q landing || systemctl restart landing"
       # Fix 2: Reload traefik jeśli nie odpowiada
-      - "@remote curl -sf http://localhost:8080/ping > /dev/null && echo '   ✅ traefik OK' || (echo '   ❌ traefik nie odpowiada → restart' && systemctl restart traefik)"
-      # Fix 3: Cleanup martwych kontenerów
+      - "@remote curl -sf http://localhost:8080/ping > /dev/null && echo '   ✅ traefik OK' || echo '   ❌ traefik nie odpowiada → restarting'"
+      - "@remote curl -sf http://localhost:8080/ping > /dev/null || systemctl restart traefik"
+      # Fix 3: Sprawdź DNS (częsty problem z Let's Encrypt)
+      - "@remote nslookup acme-v02.api.letsencrypt.org > /dev/null 2>&1 && echo '   ✅ DNS OK' || echo '   ⚠️ DNS problem — sprawdź /etc/resolv.conf'"
+      # Fix 4: Cleanup martwych kontenerów
       - "@remote podman ps -a --filter status=exited -q | xargs -r podman rm 2>/dev/null && echo '   🧹 Wyczyszczono martwe kontenery' || echo '   ℹ️ Brak martwych kontenerów'"
-      # Fix 4: Usuń dangling images (zajmują miejsce)
+      # Fix 5: Usuń dangling images (zajmują miejsce)
       - "@remote podman images --filter dangling=true -q | xargs -r podman rmi 2>/dev/null && echo '   🧹 Wyczyszczono wiszące obrazy' || echo '   ℹ️ Brak wiszących obrazów'"
       # Podsumowanie
       - "@remote echo '' && echo '✅ Naprawa zakończona' && echo '💡 Sprawdź: taskfile --env prod run health'"
@@ -373,6 +434,21 @@ tasks:
     cmds:
       - "@local echo '🏠 Local:' && echo '   📱 Web:     http://localhost:${PORT_WEB:-8000}' && echo '   🌐 Landing: http://localhost:${PORT_LANDING:-3000}'"
       - "@remote echo '🌐 Production:' && echo '   📱 Web:     ${WEB_URL}' && echo '   🌐 Landing: ${LANDING_URL}' && echo '   📊 Traefik: ${TRAEFIK_DASHBOARD}'"
+
+  backup:
+    desc: Backup Lets Encrypt certs and config
+    env: [prod]
+    cmds:
+      - "@remote echo '💾 Tworzenie backupu...' && echo ''"
+      - "@remote BACKUP_FILE=/root/backup-$(date +%Y%m%d-%H%M%S).tar.gz && tar czf $BACKUP_FILE -C / etc/containers/systemd home/tom/sandbox/deploy home/tom/sandbox/letsencrypt 2>/dev/null && echo \"   ✅ Backup: $BACKUP_FILE\" || echo '   ❌ Backup failed'"
+      - "@remote echo '' && echo '💡 Przywracanie: tar xzf backup-YYYYMMDD-HHMMSS.tar.gz -C /'"
+
+  alert:
+    desc: Check services and send alert if down
+    env: [prod]
+    cmds:
+      - "@remote echo '🔔 Sprawdzanie usług...' && curl -sf ${WEB_URL}/health > /dev/null && echo '   ✅ Web OK' || echo '🚨 ALERT: Web DOWN'"
+      - "@remote curl -sf ${LANDING_URL} > /dev/null && echo '   ✅ Landing OK' || echo '🚨 ALERT: Landing DOWN'"
 
   # ─── Code generation (project-specific) ────────────────
   # Generowanie kodu z LLM
@@ -775,6 +851,7 @@ PublishPort=80:80
 PublishPort=443:443
 PublishPort=8080:8080
 Network=proxy.network
+Volume=/home/tom/sandbox/deploy/resolv.conf:/etc/resolv.conf:ro
 Volume=/home/tom/sandbox/deploy/traefik.yml:/etc/traefik/traefik.yml:ro
 Volume=/home/tom/sandbox/deploy/traefik-dynamic.yml:/etc/traefik/dynamic/traefik-dynamic.yml:ro
 Volume=/home/tom/sandbox/letsencrypt:/letsencrypt
@@ -788,6 +865,12 @@ WantedBy=multi-user.target default.target
 ```
 
 ### deploy/ — Traefik configuration
+
+```markpact:file path=deploy/resolv.conf
+search dns.podman
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+```
 
 ```markpact:file path=deploy/traefik.yml
 global:
@@ -820,7 +903,7 @@ entryPoints:
 certificatesResolvers:
   letsencrypt:
     acme:
-      email: ${ACME_EMAIL:-admin@example.com}
+      email: admin@mask.services
       storage: /letsencrypt/acme.json
       tlsChallenge: {}
 ```
@@ -829,7 +912,7 @@ certificatesResolvers:
 http:
   routers:
     web:
-      rule: "Host(`${WEB_DOMAIN:-web.example.com}`)"
+      rule: "Host(`c2006.mask.services`)"
       entryPoints:
         - "websecure"
       service: "web"
@@ -837,7 +920,7 @@ http:
         certResolver: "letsencrypt"
 
     landing:
-      rule: "Host(`${LANDING_DOMAIN:-landing.example.com}`)"
+      rule: "Host(`c2007.mask.services`)"
       entryPoints:
         - "websecure"
       service: "landing"
@@ -925,6 +1008,92 @@ ACME_EMAIL=admin@twojadomena.com
 ```bash
 # Na serwerze produkcyjnym
 ssh root@twoj-serwer 'cat /home/tom/sandbox/letsencrypt/acme.json'
+```
+
+---
+
+## 📝 Wnioski — jak unikać problemów z IaC i Taskfile
+
+### Napotkane problemy i ich przyczyny
+
+| Problem | Przyczyna | Rozwiązanie |
+|---------|-----------|-------------|
+| `2>&1` traktowane jako argument | `shlex.split` quotuje shell redirects | Upgrade taskfile CLI (fix w 0.3.76) |
+| `${COMPOSE}` not found w doctor | Brak rozwiązywania zmiennych przed sprawdzeniem binarki | Fix w `check_task_commands` — resolve vars z `config.variables` |
+| DNS timeout w kontenerze | Podman bridge DNS (10.89.0.1) nie rozwiązuje zewn. domen | Mount `resolv.conf` z publicznym DNS (8.8.8.8) |
+| UFW blokuje ruch kontenerów | `DEFAULT_FORWARD_POLICY=DROP` blokuje podman subnet | `ufw route allow` dla podman1 ↔ ens6 |
+| `${ACME_EMAIL}` w traefik.yml | Traefik nie rozwiązuje zmiennych shellowych | Hardcode email w pliku YAML |
+| `for/do/done` w komendach | `shlex.split` rozbija shell loops | Uprość do `cmd && echo OK \|\| echo FAIL` |
+| Restart gubi port mappings | Podman quadlet race condition przy szybkim restart | `systemctl stop; sleep 3; systemctl start` |
+
+### Jak poprawić taskfile CLI, aby zapobiegać tym problemom
+
+#### 1. **Pre-deploy validation** (`taskfile doctor --pre-deploy`)
+Przed każdym `deploy` automatycznie sprawdzaj:
+- DNS z kontenera (czy ACME będzie działać)
+- Firewall FORWARD chain (czy kontenery mają internet)
+- Poprawność quadlet files (syntax, volumes exist)
+- Dostępność portów na hoście
+
+#### 2. **Automatyczny DNS w generatorze quadlet**
+Gdy taskfile generuje pliki `.container`, automatycznie dodawaj:
+```ini
+Volume=/path/to/resolv.conf:/etc/resolv.conf:ro
+```
+i twórz `resolv.conf` z publicznym DNS, jeśli wykryje podman bridge network.
+
+#### 3. **Shell-safe command mode**
+Zamiast parsować komendy przez `shlex.split` (co łamie `for/do/done`, `if/then/fi`, `(...)`),
+przekazuj je bezpośrednio do `sh -c` bez glob expansion:
+```python
+# Gdy komenda zawiera shell constructs → skip glob expansion
+if any(kw in cmd for kw in ('for ', 'while ', 'if ', '(', ')')):
+    subprocess.run(['sh', '-c', cmd])  # pass-through
+```
+
+#### 4. **Traefik config linting**
+W `taskfile doctor` sprawdzaj pliki Traefik pod kątem:
+- `${VAR}` w YAML (Traefik ich nie rozwiązuje → błąd)
+- Brak `email:` w ACME config
+- Domeny z `example.com` (placeholder nie zmieniony)
+
+#### 5. **Graceful restart w taskach**
+Zamiast `systemctl restart` (race condition z portami), domyślnie używaj:
+```yaml
+- "@remote systemctl stop traefik && sleep 3 && systemctl start traefik"
+```
+
+#### 6. **IaC best practices w Taskfile**
+- **Nie używaj `${VAR}` w plikach YAML** które nie są przetwarzane przez shell (traefik, k8s)
+- **Unikaj `for/while/if`** w komendach Taskfile — rozbij na proste `cmd && ok || fail`
+- **Testuj z `--dry-run`** przed każdym deploy na prod
+- **`taskfile doctor --remote`** po każdym deploy — weryfikuj stan serwera
+- **Backup przed zmianami**: `taskfile --env prod run backup`
+
+### Rekomendowana kolejność operacji (IaC workflow)
+
+```bash
+# 1. Walidacja lokalna
+taskfile validate
+taskfile doctor
+
+# 2. Build i test
+taskfile run build
+taskfile run dev
+taskfile --env local run health
+
+# 3. Pre-deploy check
+taskfile --env prod doctor --remote
+
+# 4. Deploy
+taskfile --env prod run deploy
+
+# 5. Post-deploy verification
+taskfile --env prod run health
+taskfile --env prod run logs
+
+# 6. Jeśli problem → rollback
+taskfile --env prod run rollback
 ```
 
 ---

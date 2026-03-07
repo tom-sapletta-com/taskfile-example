@@ -5,12 +5,16 @@ description: "Multi-platform deployment with code generation — SaaS + Desktop 
 variables:
   PROJECT_NAME: taskfile-example
   VERSION: ${VERSION:-1.0.0}
-  IMAGE_WEB: ghcr.io/tom-sapletta-com/taskfile-example-web
-  IMAGE_LANDING: ghcr.io/tom-sapletta-com/taskfile-example-landing
+  IMAGE_WEB: localhost/taskfile-example-web
+  IMAGE_LANDING: localhost/taskfile-example-landing
   TAG: ${TAG:-latest}
-  DOMAIN_WEB: ${DOMAIN_WEB:-app.localhost}
-  DOMAIN_LANDING: ${DOMAIN_LANDING:-localhost}
-  DOMAIN_API: ${DOMAIN_API:-api.localhost}
+  DOMAIN_WEB: ${DOMAIN_WEB:-}
+  DOMAIN_LANDING: ${DOMAIN_LANDING:-}
+  DOMAIN_API: ${DOMAIN_API:-}
+  # Systemd service names (match quadlet .container filenames)
+  SERVICE_WEB: web
+  SERVICE_LANDING: landing
+  SERVICE_TRAEFIK: traefik
   # LLM agent config
   LLM_AGENT: ${LLM_AGENT:-opencode}
   LLM_MODEL: ${LLM_MODEL:-openrouter/anthropic/claude-sonnet-4}
@@ -33,19 +37,19 @@ environments:
     service_manager: quadlet
     env_file: .env.staging
     variables:
-      DOMAIN_WEB: app-staging.example.com
-      DOMAIN_LANDING: staging.example.com
+      DOMAIN_WEB: ${DOMAIN_WEB:-app-staging.example.com}
+      DOMAIN_LANDING: ${DOMAIN_LANDING:-staging.example.com}
 
   prod:
-    ssh_host: ${PROD_HOST:-prod.example.com}
-    ssh_user: deploy
+    ssh_host: ${PROD_HOST:-c2006.mask.services}
+    ssh_user: ${DEPLOY_USER:-root}
     ssh_key: ~/.ssh/id_ed25519
     container_runtime: podman
     service_manager: quadlet
     env_file: .env.prod
     variables:
-      DOMAIN_WEB: app.example.com
-      DOMAIN_LANDING: example.com
+      DOMAIN_WEB: c2006.mask.services
+      DOMAIN_LANDING: c2007.mask.services
 
 environment_groups:
   all-remote:
@@ -450,24 +454,11 @@ tasks:
     env: [local]
     tags: [dev]
     cmds:
+      - "@fn port-check"
+      - "docker compose up -d --build"
       - |
-        # Run port manager and export ports
-        eval "$(@fn port-check)"
-        # Load ports from state file
-        if [ -f .port-state.json ]; then
-          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
-          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
-          export PORT_WEB PORT_LANDING
-        fi
-        docker compose up -d --build
-      - |
-        if [ -f .port-state.json ]; then
-          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
-          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
-        else
-          PORT_WEB=8000
-          PORT_LANDING=3000
-        fi
+        PORT_WEB=${PORT_WEB:-8000}
+        PORT_LANDING=${PORT_LANDING:-3000}
         echo ""
         echo "🌐 Web app   → http://localhost:${PORT_WEB}"
         echo "🖥️  Landing   → http://localhost:${PORT_LANDING}"
@@ -499,22 +490,84 @@ tasks:
         fi
         cd apps/landing && python -m http.server ${PORT_LANDING}
 
-  # ─── Monitoring ───────────────────────────────────────────────────
+  # ─── Monitoring & Operations ──────────────────────────────────────
+  # Workflow:
+  #   taskfile --env prod run status      # szybki status
+  #   taskfile --env prod run health      # pełny health check
+  #   taskfile --env prod run urls        # pokaż URL-e
+  #   taskfile --env prod run logs        # logi serwisów
+  #   taskfile --env prod run restart     # restart bez rebuild
+  #   taskfile --env prod run rollback    # cofnij do poprzedniej wersji
+  #   taskfile --env prod run fix         # auto-naprawa
 
   status:
     desc: "Check status of all services"
+    env: [local, staging, prod]
     tags: [monitoring]
     cmds:
-      - |
-        if [ -f .port-state.json ]; then
-          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
-          PORT_LANDING=$(python3 -c "import json; print(json.load(open('.port-state.json'))['LANDING'])")
-        else
-          PORT_WEB=${PORT_WEB:-8000}
-          PORT_LANDING=${PORT_LANDING:-3000}
-        fi
-        @fn health-check http://localhost:${PORT_WEB}/health
-        @fn health-check http://localhost:${PORT_LANDING}
+      - "@local docker compose ps 2>/dev/null || echo 'Docker Compose not running'"
+      - "@remote echo '📦 Running containers:' && podman ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'"
+      - "@remote echo '' && echo '📊 Systemd services:' && systemctl is-active ${SERVICE_WEB} ${SERVICE_LANDING} 2>/dev/null || true"
+      - "@remote echo '' && echo '🔗 URLs:' && echo '   📱 Web:     https://${DOMAIN_WEB}' && echo '   🌐 Landing: https://${DOMAIN_LANDING}'"
+
+  health:
+    desc: "Health check - verify all services respond"
+    env: [local, staging, prod]
+    tags: [monitoring]
+    cmds:
+      - "@local echo '🏠 Local health check:' && curl -sf http://localhost:${PORT_WEB:-8000}/health > /dev/null && echo '   ✅ Web OK' || echo '   ❌ Web not responding'"
+      - "@local curl -sf http://localhost:${PORT_LANDING:-3000} > /dev/null && echo '   ✅ Landing OK' || echo '   ❌ Landing not responding'"
+      - "@remote echo '🌐 Remote health check:'"
+      - "@remote echo '📦 Container Status:' && podman ps --format '   {{.Names}}: {{.Status}}' | grep -E 'web|landing|traefik'"
+      - "@remote systemctl is-active ${SERVICE_WEB} && echo '   ✅ web active' || echo '   ❌ web inactive'"
+      - "@remote systemctl is-active ${SERVICE_LANDING} && echo '   ✅ landing active' || echo '   ❌ landing inactive'"
+      - "@remote echo '' && echo '🔗 URLs:' && echo '   📱 Web:     https://${DOMAIN_WEB}' && echo '   🌐 Landing: https://${DOMAIN_LANDING}'"
+
+  urls:
+    desc: "Show all service URLs"
+    env: [local, staging, prod]
+    tags: [monitoring]
+    cmds:
+      - "@local echo '🏠 Local:' && echo '   📱 Web:     http://localhost:${PORT_WEB:-8000}' && echo '   🌐 Landing: http://localhost:${PORT_LANDING:-3000}'"
+      - "@remote echo '🌐 Remote:' && echo '   📱 Web:     https://${DOMAIN_WEB}' && echo '   🌐 Landing: https://${DOMAIN_LANDING}'"
+
+  restart:
+    desc: "Restart services (without rebuild)"
+    env: [local, staging, prod]
+    tags: [monitoring]
+    cmds:
+      - "@local docker compose restart"
+      - "@remote systemctl restart ${SERVICE_WEB} ${SERVICE_LANDING}"
+      - "@remote echo '✅ Serwisy zrestartowane → taskfile --env prod run health'"
+
+  rollback:
+    desc: "Rollback to previous container version"
+    env: [staging, prod]
+    tags: [monitoring]
+    cmds:
+      - "@remote echo '🔄 Rollback — przywracanie poprzedniej wersji...' && echo ''"
+      - "@remote podman image exists ${IMAGE_WEB}:prev && echo '   ✅ ${IMAGE_WEB}:prev found'"
+      - "@remote podman image exists ${IMAGE_LANDING}:prev && echo '   ✅ ${IMAGE_LANDING}:prev found'"
+      - "@remote podman tag ${IMAGE_WEB}:prev ${IMAGE_WEB}:latest"
+      - "@remote podman tag ${IMAGE_LANDING}:prev ${IMAGE_LANDING}:latest"
+      - "@remote systemctl restart ${SERVICE_WEB} ${SERVICE_LANDING}"
+      - "@remote echo '' && echo '✅ Rollback complete!'"
+      - "@remote echo '📦 Container Status:' && podman ps --format '   {{.Names}}: {{.Status}}' | grep -E 'web|landing'"
+      - "@remote echo '' && echo '💡 Następne: taskfile --env prod run health / logs'"
+
+  fix:
+    desc: "Auto-detect and fix common issues"
+    env: [staging, prod]
+    tags: [monitoring]
+    cmds:
+      - "@remote echo '🔧 Diagnostyka automatyczna...' && echo ''"
+      - "@remote podman ps | grep -q ${SERVICE_WEB} && echo '   ✅ web działa' || echo '   ❌ web nie działa → restarting'"
+      - "@remote podman ps | grep -q ${SERVICE_WEB} || systemctl restart ${SERVICE_WEB}"
+      - "@remote podman ps | grep -q ${SERVICE_LANDING} && echo '   ✅ landing działa' || echo '   ❌ landing nie działa → restarting'"
+      - "@remote podman ps | grep -q ${SERVICE_LANDING} || systemctl restart ${SERVICE_LANDING}"
+      - "@remote podman ps -a --filter status=exited -q | xargs -r podman rm 2>/dev/null && echo '   🧹 Wyczyszczono martwe kontenery' || echo '   ℹ️ Brak martwych kontenerów'"
+      - "@remote podman images --filter dangling=true -q | xargs -r podman rmi 2>/dev/null && echo '   🧹 Wyczyszczono wiszące obrazy' || echo '   ℹ️ Brak wiszących obrazów'"
+      - "@remote echo '' && echo '✅ Naprawa zakończona' && echo '💡 Sprawdź: taskfile --env prod run health'"
 
   monitor:
     desc: "Run full monitoring suite"
@@ -595,13 +648,7 @@ tasks:
     desc: "Wait for service to be ready (host:port timeout)"
     tags: [utility]
     cmds:
-      - |
-        if [ -f .port-state.json ]; then
-          PORT_WEB=$(python3 -c "import json; print(json.load(open('.port-state.json'))['WEB'])")
-        else
-          PORT_WEB=${PORT_WEB:-8000}
-        fi
-        @fn wait-for localhost:${PORT_WEB} 60
+      - "@fn wait-for localhost:${PORT_WEB:-8000} 60"
 
   backup:
     desc: "Backup Docker volumes"
